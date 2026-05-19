@@ -1,0 +1,15 @@
+# CRM data (contains personal business data)
+crm_data.csv
+activity_log.csv
+sequence_queue.csv
+config.json
+templates.json
+sequences.json
+bounced_emails.json
+gmail_cache/
+_upload.csv
+
+# Python
+__pycache__/
+*.pyc
+.DS_Store
