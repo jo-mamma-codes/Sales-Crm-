@@ -6,6 +6,7 @@ config.json
 templates.json
 sequences.json
 bounced_emails.json
+send_tracker.json
 gmail_cache/
 _upload.csv
 

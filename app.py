@@ -138,12 +138,43 @@ def mailto_link(to, subject, body):
     return f"mailto:{to}?{q}"
 
 
-def gmail_link(to, subject, body):
-    q = urllib.parse.urlencode(
-        {"view": "cm", "fs": "1", "to": to, "su": subject, "body": body},
-        quote_via=urllib.parse.quote,
-    )
-    return f"https://mail.google.com/mail/?{q}"
+SENDERS = [
+    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 40},
+    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 40},
+    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 40},
+    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 40},
+]
+SEND_TRACKER = ROOT / "send_tracker.json"
+
+
+def load_send_counts():
+    today = date.today().isoformat()
+    if SEND_TRACKER.exists():
+        data = json.loads(SEND_TRACKER.read_text())
+        if data.get("date") == today:
+            return data
+    return {"date": today, "counts": {s["email"]: 0 for s in SENDERS}}
+
+
+def save_send_counts(data):
+    SEND_TRACKER.write_text(json.dumps(data, indent=2))
+
+
+def pick_sender(tracker):
+    for s in SENDERS:
+        used = tracker["counts"].get(s["email"], 0)
+        if used < s["daily_cap"]:
+            return s
+    return None
+
+
+def gmail_link(to, subject, body, sender_email=None):
+    su = urllib.parse.quote(subject, safe="")
+    bo = urllib.parse.quote(body, safe="")
+    url = f"https://mail.google.com/mail/u/0/?view=cm&fs=1&to={to}&su={su}&body={bo}"
+    if sender_email:
+        url += f"&authuser={sender_email}"
+    return url
 
 DEFAULT_SEQUENCES = {
     "Cold outreach": {
@@ -249,12 +280,17 @@ def load_gmail_cache(email_addr):
 
 
 STAGES = ["New", "Contacted", "Demo Booked", "Proposal", "Won", "Lost"]
+REFERRAL_STAGES = ["New Referral", "Contacted", "Referral Signed Up", "Reward Sent"]
+PIPELINES = {
+    "Sales": STAGES,
+    "Referral": REFERRAL_STAGES,
+}
 DEFAULT_TARGET = 20
 
 COLUMNS = [
     "id", "business_name", "contact_name", "phone", "email",
     "region", "category", "stage", "last_touch", "next_action_date",
-    "next_action", "notes", "source", "created",
+    "next_action", "notes", "source", "created", "pipeline",
 ]
 
 
@@ -317,7 +353,7 @@ def next_id(df):
     return str(df["id"].astype(int).max() + 1)
 
 
-def import_leads(df, src_path, region_filter=None, limit=None):
+def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales", default_stage="New"):
     if not src_path.exists():
         return df, 0
     src = pd.read_csv(src_path, dtype=str).fillna("")
@@ -351,13 +387,14 @@ def import_leads(df, src_path, region_filter=None, limit=None):
             "email": r.get("email", "") or None,
             "region": r.get("region", "") or None,
             "category": r.get("category", "") or None,
-            "stage": "New",
+            "stage": default_stage,
             "last_touch": None,
             "next_action_date": None,
             "next_action": None,
             "notes": None,
             "source": r.get("source", "ready_for_outreach") or None,
             "created": date.today().isoformat(),
+            "pipeline": pipeline,
         })
         nid += 1
     if rows:
@@ -682,7 +719,9 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
             new_phone = st.text_input("Phone", lead["phone"], key="pv_phone")
             new_email = st.text_input("Email", lead["email"], key="pv_email")
-            new_stage = st.selectbox("Stage", STAGES, index=STAGES.index(lead["stage"]) if lead["stage"] in STAGES else 0, key="pv_stage")
+            lead_pipeline = lead.get("pipeline") or "Sales"
+            lead_stages = PIPELINES.get(lead_pipeline, STAGES)
+            new_stage = st.selectbox("Stage", lead_stages, index=lead_stages.index(lead["stage"]) if lead["stage"] in lead_stages else 0, key="pv_stage")
             nad_val = None
             if lead["next_action_date"]:
                 try:
@@ -799,15 +838,64 @@ tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_sequences, tab_ch
 STAGE_CLASSES = {
     "New": "stage-new", "Contacted": "stage-contacted", "Demo Booked": "stage-demo",
     "Proposal": "stage-proposal", "Won": "stage-won", "Lost": "stage-lost",
+    "New Referral": "stage-new", "Referral Signed Up": "stage-won", "Reward Sent": "stage-demo",
 }
 
 with tab_pipeline:
+    ph1, ph2 = st.columns([2, 1])
+    active_pipeline = ph1.selectbox("Deal pipeline", list(PIPELINES.keys()), key="pipeline_sel")
+    active_stages = PIPELINES[active_pipeline]
+
+    if ph2.button("＋ New deal", type="primary", key="new_deal_btn"):
+        st.session_state["show_new_deal"] = True
+
+    if st.session_state.get("show_new_deal"):
+        with st.form("new_deal_form", clear_on_submit=True):
+            st.subheader(f"New {active_pipeline} deal")
+            nc1, nc2 = st.columns(2)
+            nd_biz = nc1.text_input("Business name *", key="nd_biz")
+            nd_contact = nc2.text_input("Contact name", key="nd_contact")
+            nd_phone = nc1.text_input("Phone", key="nd_phone")
+            nd_email = nc2.text_input("Email", key="nd_email")
+            nd_region = nc1.text_input("Region", key="nd_region")
+            nd_category = nc2.text_input("Category", key="nd_category")
+            nd_stage = nc1.selectbox("Stage", active_stages, key="nd_stage")
+            nd_nad = nc2.date_input("Next action date", value=None, key="nd_nad")
+            nd_na = st.text_input("Next action", key="nd_na")
+            nd_notes = st.text_area("Notes", key="nd_notes")
+            fc1, fc2 = st.columns(2)
+            if fc1.form_submit_button("Add deal", type="primary"):
+                if not nd_biz:
+                    st.error("Business name required")
+                else:
+                    new_deal = {
+                        "id": int(next_id(df)), "business_name": nd_biz,
+                        "contact_name": nd_contact or None, "phone": nd_phone or None,
+                        "email": nd_email or None, "region": nd_region or None,
+                        "category": nd_category or None, "stage": nd_stage,
+                        "last_touch": None,
+                        "next_action_date": nd_nad.isoformat() if nd_nad else None,
+                        "next_action": nd_na or None, "notes": nd_notes or None,
+                        "source": "manual", "created": date.today().isoformat(),
+                        "pipeline": active_pipeline,
+                    }
+                    sb.table("leads").insert(new_deal).execute()
+                    st.success(f"Added {nd_biz} to {active_pipeline} pipeline")
+                    st.session_state["show_new_deal"] = False
+                    st.rerun()
+            if fc2.form_submit_button("Cancel"):
+                st.session_state["show_new_deal"] = False
+                st.rerun()
+
     pf1, pf2, pf3 = st.columns([2, 2, 2])
     p_region = pf1.text_input("Region filter", key="p_region")
     p_search = pf2.text_input("Search name/email", key="p_search")
     p_category = pf3.text_input("Category filter", key="p_category")
 
     view = df.copy()
+    view = view[view["pipeline"].isin([active_pipeline, ""])]
+    if active_pipeline == "Sales":
+        view = view[~view["stage"].isin(REFERRAL_STAGES)]
     if p_region:
         view = view[view["region"].str.contains(p_region, case=False, na=False)]
     if p_search:
@@ -828,8 +916,8 @@ with tab_pipeline:
     def move_lead(lid, new_stage):
         save_lead(lid, {"stage": new_stage})
 
-    cols = st.columns(len(STAGES))
-    for i, stage in enumerate(STAGES):
+    cols = st.columns(len(active_stages))
+    for i, stage in enumerate(active_stages):
         stage_df = view[view["stage"] == stage]
         cls = STAGE_CLASSES.get(stage, "stage-new")
         expanded = st.session_state["kanban_expanded"].get(stage, False)
@@ -857,7 +945,7 @@ with tab_pipeline:
                 )
                 bc1, bc2 = st.columns(2)
                 bc1.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
-                other_stages = [s for s in STAGES if s != stage]
+                other_stages = [s for s in active_stages if s != stage]
                 new_s = bc2.selectbox("Move →", [stage] + other_stages, key=f"mv_{row['id']}", label_visibility="collapsed")
                 if new_s != stage:
                     move_lead(row["id"], new_s)
@@ -876,14 +964,14 @@ with tab_pipeline:
 
     st.divider()
     st.caption("Move deals between stages below (table editor)")
-    stage_f = st.multiselect("Show stages", STAGES, default=[s for s in STAGES if s not in ("Won", "Lost")], key="p_stage_f")
+    stage_f = st.multiselect("Show stages", active_stages, default=[s for s in active_stages if s not in ("Won", "Lost", "Reward Sent")], key="p_stage_f")
     edit_view = view[view["stage"].isin(stage_f)] if stage_f else view
     edited = st.data_editor(
         edit_view[["id", "business_name", "contact_name", "stage", "next_action", "next_action_date"]],
         num_rows="fixed",
         use_container_width=True,
         column_config={
-            "stage": st.column_config.SelectboxColumn("Stage", options=STAGES, required=True),
+            "stage": st.column_config.SelectboxColumn("Stage", options=active_stages, required=True),
             "id": st.column_config.TextColumn("ID", disabled=True),
         },
         height=400,
@@ -1004,7 +1092,9 @@ with tab_lead:
                 new_contact = st.text_input("Contact name", lead["contact_name"], key="d_contact")
                 new_phone = st.text_input("Phone", lead["phone"], key="d_phone")
                 new_email = st.text_input("Email", lead["email"], key="d_email")
-                new_stage = st.selectbox("Stage", STAGES, index=STAGES.index(lead["stage"]) if lead["stage"] in STAGES else 0, key="d_stage")
+                d_lead_pipeline = lead.get("pipeline") or "Sales"
+                d_lead_stages = PIPELINES.get(d_lead_pipeline, STAGES)
+                new_stage = st.selectbox("Stage", d_lead_stages, index=d_lead_stages.index(lead["stage"]) if lead["stage"] in d_lead_stages else 0, key="d_stage")
                 nad_val = None
                 if lead["next_action_date"]:
                     try:
@@ -1215,28 +1305,88 @@ with tab_bulk:
         if not batch.empty:
             sample_lead = batch.iloc[0].to_dict()
             prev_s, prev_b = render_template(templates[tmpl_pick], sample_lead)
-            with st.expander("Preview (first lead)"):
+            with st.expander("Preview (first lead)", expanded=True):
                 st.markdown(f"**To:** {sample_lead['email']}")
                 st.markdown(f"**Subject:** {prev_s}")
                 st.text(prev_b)
 
-        st.warning(f"This generates {limit} Gmail compose links. Open each to send. Max ~50/day from one inbox to avoid spam flags.")
+        tracker = load_send_counts()
+        remaining_today = sum(s["daily_cap"] - tracker["counts"].get(s["email"], 0) for s in SENDERS)
+        st.markdown(f"**Sender rotation active** — {len(SENDERS)} inboxes, **{remaining_today}** sends left today")
+        for s in SENDERS:
+            used = tracker["counts"].get(s["email"], 0)
+            left = s["daily_cap"] - used
+            bar_pct = used / s["daily_cap"] if s["daily_cap"] > 0 else 0
+            color = "🟢" if left > 20 else "🟡" if left > 5 else "🔴"
+            st.caption(f"{color} {s['email']}: {used}/{s['daily_cap']} sent ({left} left)")
+
+        if limit > remaining_today:
+            st.error(f"Only {remaining_today} sends left across all inboxes today. Lower the limit or wait til tomorrow.")
 
         if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
             links = []
+            skipped = 0
             for _, row in batch.iterrows():
+                sender = pick_sender(tracker)
+                if not sender:
+                    skipped += 1
+                    continue
                 lead = row.to_dict()
                 s, b = render_template(templates[tmpl_pick], lead)
-                gm = gmail_link(lead["email"], s, b)
-                links.append({"business": lead["business_name"], "email": lead["email"], "link": gm})
-                log_activity(lead["id"], lead["business_name"], "email", s, b)
-                updates = {"last_touch": date.today().isoformat()}
-                if lead["stage"] == "New":
-                    updates["stage"] = "Contacted"
-                save_lead(lead["id"], updates)
-            st.success(f"Logged {len(links)} emails. Click links below to open Gmail compose:")
+                gm = gmail_link(lead["email"], s, b, sender_email=sender["email"])
+                links.append({
+                    "business": lead["business_name"], "email": lead["email"],
+                    "link": gm, "sender": sender["email"],
+                    "lead_id": lead["id"], "subject": s, "body": b,
+                })
+                tracker["counts"][sender["email"]] = tracker["counts"].get(sender["email"], 0) + 1
+            st.session_state["bulk_links"] = links
+            st.session_state["bulk_skipped"] = skipped
+            save_send_counts(tracker)
+            st.rerun()
+
+        if st.session_state.get("bulk_links"):
+            links = st.session_state["bulk_links"]
+            skipped = st.session_state.get("bulk_skipped", 0)
+            if skipped:
+                st.warning(f"Skipped {skipped} — all inboxes hit daily cap.")
+            st.info(f"{len(links)} compose links ready. Open them, send, then click **Confirm all sent** below.")
+            rows_html = ""
+            current_sender = None
             for lnk in links:
-                st.markdown(f"- [{lnk['business']}]({lnk['link']}) — {lnk['email']}")
+                if lnk["sender"] != current_sender:
+                    current_sender = lnk["sender"]
+                    rows_html += f'<tr><td colspan="2" style="padding:10px 0 4px;font-weight:bold;font-size:14px;">From: {html_mod.escape(current_sender)}</td></tr>'
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="padding:3px 8px 3px 0;"><a href="{html_mod.escape(lnk["link"])}" target="_blank" '
+                    f'rel="noopener" style="color:#0d6efd;text-decoration:none;">✉ {html_mod.escape(lnk["business"])}</a></td>'
+                    f'<td style="padding:3px 0;color:#666;">{html_mod.escape(lnk["email"])}</td>'
+                    f'</tr>'
+                )
+            import streamlit.components.v1 as components
+            components.html(
+                f'<table style="font-family:sans-serif;font-size:13px;width:100%;">{rows_html}</table>',
+                height=min(len(links) * 32 + 80, 800),
+                scrolling=True,
+            )
+            cc1, cc2 = st.columns(2)
+            if cc1.button("✅ Confirm all sent", type="primary", key="b_confirm"):
+                for lnk in links:
+                    log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                    updates = {"last_touch": date.today().isoformat()}
+                    save_lead(lnk["lead_id"], updates)
+                st.session_state["bulk_links"] = None
+                st.success(f"Logged {len(links)} emails as sent.")
+                st.rerun()
+            if cc2.button("❌ Cancel (not sent)", key="b_cancel"):
+                tracker = load_send_counts()
+                for lnk in links:
+                    tracker["counts"][lnk["sender"]] = max(0, tracker["counts"].get(lnk["sender"], 0) - 1)
+                save_send_counts(tracker)
+                st.session_state["bulk_links"] = None
+                st.info("Cancelled. Send counts rolled back.")
+                st.rerun()
 
 
 # ─── Sequences ───────────────────────────────────────────────────────────────
@@ -1410,9 +1560,10 @@ with tab_add:
         email = c2.text_input("Email")
         region = c1.text_input("Region")
         category = c2.text_input("Category")
-        stage = c1.selectbox("Stage", STAGES)
-        nad = c2.date_input("Next action date", value=None)
-        na = st.text_input("Next action")
+        pl = c1.selectbox("Pipeline", list(PIPELINES.keys()), key="add_pipeline")
+        stage = c2.selectbox("Stage", PIPELINES[pl], key="add_stage")
+        nad = c1.date_input("Next action date", value=None)
+        na = c2.text_input("Next action")
         notes = st.text_area("Notes")
         if st.form_submit_button("Add", type="primary"):
             if not biz:
@@ -1425,7 +1576,7 @@ with tab_add:
                     "last_touch": None,
                     "next_action_date": nad.isoformat() if nad else None,
                     "next_action": na or None, "notes": notes or None, "source": "manual",
-                    "created": date.today().isoformat(),
+                    "created": date.today().isoformat(), "pipeline": pl,
                 }
                 sb.table("leads").insert(new).execute()
                 st.success(f"Added {biz}")
@@ -1449,14 +1600,22 @@ with tab_import:
 
     st.divider()
     st.subheader("Upload custom CSV")
-    up = st.file_uploader("CSV with business_name, email, phone, etc.", type="csv")
-    if up and st.button("Import uploaded"):
-        tmp = ROOT / "_upload.csv"
-        tmp.write_bytes(up.read())
-        df, added = import_leads(df, tmp, None, None)
-        tmp.unlink()
-        st.success(f"Imported {added} new leads")
-        st.rerun()
+    st.caption("CSV needs `business_name` column. Optional: `email`, `phone`, `first_name`, `last_name`, `region`, `category`, `source`.")
+    up = st.file_uploader("Choose CSV file", type="csv", key="csv_upload")
+    if up:
+        tmp_df = pd.read_csv(up, dtype=str).fillna("")
+        st.write(f"**{len(tmp_df)} rows** found. Columns: {', '.join(tmp_df.columns.tolist())}")
+        st.dataframe(tmp_df.head(10), use_container_width=True, height=200)
+        uc1, uc2 = st.columns(2)
+        up_pipeline = uc1.selectbox("Import to pipeline", list(PIPELINES.keys()), key="up_pipeline")
+        up_stage = uc2.selectbox("Default stage", PIPELINES[up_pipeline], key="up_stage")
+        if st.button("Import uploaded", type="primary"):
+            tmp = ROOT / "_upload.csv"
+            tmp.write_bytes(up.getvalue())
+            df, added = import_leads(df, tmp, None, None, pipeline=up_pipeline, default_stage=up_stage)
+            tmp.unlink()
+            st.success(f"Imported {added} new leads to {up_pipeline} pipeline")
+            st.rerun()
 
 # ─── Templates (HubSpot-style) ──────────────────────────────────────────────
 with tab_templates:
