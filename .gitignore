@@ -9,6 +9,9 @@ bounced_emails.json
 gmail_cache/
 _upload.csv
 
+# Migration (one-time)
+migrate_to_supabase.py
+
 # Python
 __pycache__/
 *.pyc

@@ -1,4 +1,4 @@
-"""Yetipay solo CRM — Streamlit dashboard."""
+"""Yetipay solo CRM — Streamlit dashboard (Supabase backend)."""
 import html as html_mod
 import os
 import json
@@ -8,17 +8,24 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from supabase import create_client
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "crm_data.csv"
 CONFIG = ROOT / "config.json"
-ACTIVITY = ROOT / "activity_log.csv"
 TEMPLATES = ROOT / "templates.json"
 LEADS_SRC = ROOT.parent / "data" / "ready_for_outreach.csv"
+SEQUENCES = ROOT / "sequences.json"
+
+SUPABASE_URL = "https://ndfgaqefiekgtcyzmmuj.supabase.co"
+SUPABASE_KEY = "sb_publishable_Okz9BDOjHA6rkAo6YVja5w_loiV4Unq"
+
+@st.cache_resource
+def get_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+sb = get_supabase()
 
 ACTIVITY_COLS = ["timestamp", "lead_id", "business_name", "type", "subject", "content"]
-SEQUENCES = ROOT / "sequences.json"
-SEQ_QUEUE = ROOT / "sequence_queue.csv"
 SEQ_QUEUE_COLS = ["lead_id", "business_name", "sequence_name", "step", "due_date", "status"]
 
 TOKENS = {
@@ -94,23 +101,26 @@ def save_templates(t):
 
 
 def load_activity():
-    if ACTIVITY.exists():
-        return pd.read_csv(ACTIVITY, dtype=str).fillna("")
+    r = sb.table("activity").select("*").execute()
+    if r.data:
+        df = pd.DataFrame(r.data).fillna("")
+        for c in ACTIVITY_COLS:
+            if c not in df.columns:
+                df[c] = ""
+        return df
     return pd.DataFrame(columns=ACTIVITY_COLS)
 
 
 def log_activity(lead_id, business_name, type_, subject, content):
-    a = load_activity()
     row = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "lead_id": str(lead_id),
+        "lead_id": int(lead_id),
         "business_name": business_name,
         "type": type_,
         "subject": subject,
         "content": content,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
-    a = pd.concat([a, pd.DataFrame([row])], ignore_index=True)
-    a.to_csv(ACTIVITY, index=False)
+    sb.table("activity").insert(row).execute()
 
 
 def render_template(tmpl, lead):
@@ -166,33 +176,51 @@ def save_sequences(s):
 
 
 def load_seq_queue():
-    if SEQ_QUEUE.exists():
-        return pd.read_csv(SEQ_QUEUE, dtype=str).fillna("")
+    r = sb.table("sequence_queue").select("*").execute()
+    if r.data:
+        df = pd.DataFrame(r.data)
+        for c in SEQ_QUEUE_COLS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df.fillna("")
+        for c in df.columns:
+            df[c] = df[c].astype(str)
+        return df
     return pd.DataFrame(columns=SEQ_QUEUE_COLS)
 
 
 def save_seq_queue(q):
-    q.to_csv(SEQ_QUEUE, index=False)
+    sb.table("sequence_queue").delete().neq("lead_id", -999).execute()
+    if not q.empty:
+        rows = q.to_dict("records")
+        for r in rows:
+            if r.get("lead_id"):
+                r["lead_id"] = int(r["lead_id"])
+            if r.get("step"):
+                r["step"] = int(r["step"])
+            for k, v in r.items():
+                if v == "":
+                    r[k] = None
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            sb.table("sequence_queue").insert(rows[i:i+batch_size]).execute()
 
 
 def enroll_lead(lead_id, business_name, seq_name, sequences):
     seq = sequences[seq_name]
-    q = load_seq_queue()
-    # remove existing enrollment for this lead+sequence
-    q = q[~((q["lead_id"] == str(lead_id)) & (q["sequence_name"] == seq_name))]
+    sb.table("sequence_queue").delete().eq("lead_id", int(lead_id)).eq("sequence_name", seq_name).execute()
     rows = []
     for i, step in enumerate(seq["steps"]):
         due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
         rows.append({
-            "lead_id": str(lead_id),
+            "lead_id": int(lead_id),
             "business_name": business_name,
             "sequence_name": seq_name,
-            "step": str(i),
+            "step": i,
             "due_date": due,
             "status": "pending",
         })
-    q = pd.concat([q, pd.DataFrame(rows)], ignore_index=True)
-    save_seq_queue(q)
+    sb.table("sequence_queue").insert(rows).execute()
     return len(rows)
 
 
@@ -241,17 +269,46 @@ def save_config(cfg):
 
 
 def load_crm():
-    if DATA.exists():
-        df = pd.read_csv(DATA, dtype=str).fillna("")
+    all_data = []
+    page_size = 1000
+    offset = 0
+    while True:
+        r = sb.table("leads").select("*").range(offset, offset + page_size - 1).execute()
+        if not r.data:
+            break
+        all_data.extend(r.data)
+        if len(r.data) < page_size:
+            break
+        offset += page_size
+    if all_data:
+        df = pd.DataFrame(all_data).fillna("")
         for c in COLUMNS:
             if c not in df.columns:
                 df[c] = ""
+        for c in df.columns:
+            df[c] = df[c].astype(str)
         return df[COLUMNS]
     return pd.DataFrame(columns=COLUMNS)
 
 
 def save_crm(df):
-    df.to_csv(DATA, index=False)
+    rows = df.to_dict("records")
+    for r in rows:
+        r["id"] = int(r["id"])
+        for k, v in r.items():
+            if v == "":
+                r[k] = None
+    batch_size = 500
+    for i in range(0, len(rows), batch_size):
+        sb.table("leads").upsert(rows[i:i+batch_size]).execute()
+
+
+def save_lead(lead_id, updates):
+    """Save specific fields for one lead (avoids full-table upsert)."""
+    for k, v in updates.items():
+        if v == "":
+            updates[k] = None
+    sb.table("leads").update(updates).eq("id", int(lead_id)).execute()
 
 
 def next_id(df):
@@ -287,24 +344,27 @@ def import_leads(df, src_path, region_filter=None, limit=None):
     for _, r in src.iterrows():
         contact = f"{r.get('first_name','')} {r.get('last_name','')}".strip()
         rows.append({
-            "id": str(nid),
-            "business_name": r.get("business_name", ""),
-            "contact_name": contact,
-            "phone": r.get("phone", ""),
-            "email": r.get("email", ""),
-            "region": r.get("region", ""),
-            "category": r.get("category", ""),
+            "id": nid,
+            "business_name": r.get("business_name", "") or None,
+            "contact_name": contact or None,
+            "phone": r.get("phone", "") or None,
+            "email": r.get("email", "") or None,
+            "region": r.get("region", "") or None,
+            "category": r.get("category", "") or None,
             "stage": "New",
-            "last_touch": "",
-            "next_action_date": "",
-            "next_action": "",
-            "notes": "",
-            "source": r.get("source", "ready_for_outreach"),
+            "last_touch": None,
+            "next_action_date": None,
+            "next_action": None,
+            "notes": None,
+            "source": r.get("source", "ready_for_outreach") or None,
             "created": date.today().isoformat(),
         })
         nid += 1
     if rows:
-        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            sb.table("leads").insert(rows[i:i+batch_size]).execute()
+        df = load_crm()
     return df, len(rows)
 
 
@@ -509,6 +569,39 @@ st.markdown(HUBSPOT_CSS, unsafe_allow_html=True)
 cfg = load_config()
 df = load_crm()
 
+# Initialise profile view state
+if "view_lead_id" not in st.session_state:
+    st.session_state["view_lead_id"] = None
+
+
+def open_profile(lead_id):
+    st.session_state["view_lead_id"] = str(lead_id)
+
+
+def close_profile():
+    st.session_state["view_lead_id"] = None
+
+
+# ─── Global search bar ─────────────────────────────────────────────────────
+gs1, gs2 = st.columns([3, 1])
+global_search = gs1.text_input("🔍 Search leads by name, email, phone, or business", key="global_search", label_visibility="collapsed", placeholder="Search leads by name, email, phone, or business...")
+if global_search and not df.empty:
+    m = (df["business_name"].str.contains(global_search, case=False, na=False)
+         | df["email"].str.contains(global_search, case=False, na=False)
+         | df["contact_name"].str.contains(global_search, case=False, na=False)
+         | df["phone"].str.contains(global_search, case=False, na=False))
+    results = df[m].head(10)
+    if results.empty:
+        st.caption("No results")
+    else:
+        for _, r in results.iterrows():
+            rc1, rc2, rc3, rc4 = st.columns([2, 2, 1, 1])
+            rc1.write(f"**{r['business_name']}** — {r['contact_name']}")
+            rc2.write(r["email"])
+            rc3.write(r["stage"])
+            rc4.button("View", key=f"gs_{r['id']}", on_click=open_profile, args=(r["id"],))
+        st.divider()
+
 # KPI bar
 won = len(df[df["stage"] == "Won"])
 target = cfg["target"]
@@ -528,6 +621,176 @@ st.markdown(f"""
 <div class="target-bar"><div class="target-fill" style="width:{pct*100:.0f}%"></div></div>
 """, unsafe_allow_html=True)
 
+# ─── Profile view (full-screen when a lead is selected) ───────────────────
+PILL_MAP = {
+    "New": "stage-pill-new", "Contacted": "stage-pill-contacted",
+    "Demo Booked": "stage-pill-demo", "Proposal": "stage-pill-proposal",
+    "Won": "stage-pill-won", "Lost": "stage-pill-lost",
+}
+
+view_lead_id = st.session_state.get("view_lead_id")
+if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
+    lead = df[df["id"] == str(view_lead_id)].iloc[0].to_dict()
+    lead_id = str(view_lead_id)
+    templates = load_templates()
+    esc = html_mod.escape
+
+    st.button("← Back to CRM", on_click=close_profile)
+
+    sidebar, main = st.columns([1, 2])
+
+    with sidebar:
+        initials = "".join(w[0] for w in (lead["contact_name"] or "?").split()[:2]).upper() or "?"
+        pill_cls = PILL_MAP.get(lead["stage"], "stage-pill-new")
+        name_parts = (lead["contact_name"] or "").split()
+        first_name = name_parts[0] if name_parts else "--"
+        last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "--"
+
+        phone_href = f'<a href="tel:{esc(lead["phone"])}" class="profile-action-btn">📞</a>' if lead["phone"] else '<span class="profile-action-btn" style="opacity:0.3">📞</span>'
+        email_href = f'<a href="mailto:{esc(lead["email"])}" class="profile-action-btn">✉️</a>' if lead["email"] else '<span class="profile-action-btn" style="opacity:0.3">✉️</span>'
+
+        st.markdown(f"""<div class="profile-card">
+            <div class="profile-avatar">{esc(initials)}</div>
+            <div class="profile-name">{esc(lead['contact_name'] or 'Unknown')}</div>
+            <div class="profile-role">{esc(lead['business_name'])}</div>
+            <div class="profile-email">{esc(lead['email'] or 'No email')}</div>
+            <div class="profile-actions">
+                <div class="profile-action-item"><span class="profile-action-btn">📝</span><span class="profile-action-label">Note</span></div>
+                <div class="profile-action-item">{email_href}<span class="profile-action-label">Email</span></div>
+                <div class="profile-action-item">{phone_href}<span class="profile-action-label">Call</span></div>
+                <div class="profile-action-item"><span class="profile-action-btn">📋</span><span class="profile-action-label">Task</span></div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown(f"""<div class="profile-section">
+            <div class="profile-section-header"><span class="profile-section-title">About this contact</span></div>
+            <div class="profile-field"><div class="profile-field-label">First name</div><div class="profile-field-value">{esc(first_name)}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Last name</div><div class="profile-field-value">{esc(last_name)}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Email</div><div class="profile-field-value">{esc(lead['email'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Phone</div><div class="profile-field-value">{esc(lead['phone'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Company</div><div class="profile-field-value">{esc(lead['business_name'])}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Stage</div><div class="profile-field-value"><span class="contact-stage {pill_cls}">{esc(lead['stage'])}</span></div></div>
+            <div class="profile-field"><div class="profile-field-label">Category</div><div class="profile-field-value">{esc(lead['category'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Region</div><div class="profile-field-value">{esc(lead['region'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Source</div><div class="profile-field-value">{esc(lead['source'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Created</div><div class="profile-field-value">{esc(lead['created'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Last touch</div><div class="profile-field-value">{esc(lead['last_touch'] or 'Never')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Notes</div><div class="profile-field-value">{esc(lead['notes'] or '--')}</div></div>
+        </div>""", unsafe_allow_html=True)
+
+        with st.expander("Edit contact"):
+            new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
+            new_phone = st.text_input("Phone", lead["phone"], key="pv_phone")
+            new_email = st.text_input("Email", lead["email"], key="pv_email")
+            new_stage = st.selectbox("Stage", STAGES, index=STAGES.index(lead["stage"]) if lead["stage"] in STAGES else 0, key="pv_stage")
+            nad_val = None
+            if lead["next_action_date"]:
+                try:
+                    nad_val = datetime.fromisoformat(lead["next_action_date"]).date()
+                except Exception:
+                    pass
+            new_nad = st.date_input("Next action date", value=nad_val, key="pv_nad")
+            new_na = st.text_input("Next action", lead["next_action"], key="pv_na")
+            new_notes = st.text_area("Notes", lead["notes"], height=80, key="pv_notes")
+            if st.button("Save", type="primary", key="pv_save"):
+                save_lead(lead_id, {
+                    "contact_name": new_contact, "phone": new_phone, "email": new_email,
+                    "stage": new_stage, "next_action_date": new_nad.isoformat() if new_nad else "",
+                    "next_action": new_na, "notes": new_notes,
+                })
+                st.rerun()
+
+    with main:
+        act_tab = st.radio("", ["Email", "Call / Note", "Timeline"], horizontal=True, key="pv_action_tab")
+
+        if act_tab == "Email":
+            tmpl_names = list(templates.keys())
+            chosen = st.selectbox("Template", ["— blank —"] + tmpl_names, key="pv_tmpl")
+            if chosen != "— blank —":
+                subj_init, body_init = render_template(templates[chosen], lead)
+            else:
+                subj_init, body_init = "", ""
+            subj = st.text_input("Subject", subj_init, key="pv_subj")
+            body = st.text_area("Body", body_init, height=200, key="pv_body")
+            to = lead["email"]
+            bc1, bc2, bc3 = st.columns([1, 1, 2])
+            if to and subj:
+                gm = gmail_link(to, subj, body)
+                mt = mailto_link(to, subj, body)
+                bc1.markdown(f"<a href='{gm}' target='_blank'><button style='padding:8px 16px;background:#00bda5;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;width:100%'>Open in Gmail</button></a>", unsafe_allow_html=True)
+                bc2.markdown(f"<a href='{mt}'><button style='padding:8px 16px;background:#33475b;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;width:100%'>Mail client</button></a>", unsafe_allow_html=True)
+            elif not to:
+                st.warning("No email on lead")
+            if st.button("Log as sent", key="pv_logsent"):
+                log_activity(lead_id, lead["business_name"], "email", subj, body)
+                updates = {"last_touch": date.today().isoformat()}
+                if lead["stage"] == "New":
+                    updates["stage"] = "Contacted"
+                save_lead(lead_id, updates)
+                st.rerun()
+
+        elif act_tab == "Call / Note":
+            call_type = st.radio("Type", ["call", "note"], horizontal=True, key="pv_ctype")
+            call_subj = st.text_input("Outcome / subject", key="pv_csubj", placeholder="e.g. left voicemail, spoke to owner")
+            call_body = st.text_area("Details", height=150, key="pv_cbody", placeholder="What was said, next steps...")
+            if st.button("Log " + call_type, type="primary", key="pv_clog"):
+                if call_subj or call_body:
+                    log_activity(lead_id, lead["business_name"], call_type, call_subj, call_body)
+                    updates = {"last_touch": date.today().isoformat()}
+                    if call_type == "call" and lead["stage"] == "New":
+                        updates["stage"] = "Contacted"
+                    save_lead(lead_id, updates)
+                    st.rerun()
+                else:
+                    st.error("Add subject or details")
+
+        elif act_tab == "Timeline":
+            timeline_items = []
+            act_df = load_activity()
+            lead_act = act_df[act_df["lead_id"] == str(lead_id)]
+            for _, r in lead_act.iterrows():
+                timeline_items.append({"timestamp": r["timestamp"], "type": r["type"], "title": r["subject"] or r["type"].title(), "body": r["content"], "source": "crm"})
+
+            cached_gmail = load_gmail_cache(lead["email"]) if lead["email"] else None
+            if cached_gmail:
+                for t in cached_gmail.get("threads", []):
+                    for m in t.get("messages", []):
+                        sender = m.get("sender", "")
+                        direction = "Sent" if "yetipay" in sender.lower() else "Received"
+                        timeline_items.append({"timestamp": m.get("date", ""), "type": "gmail", "title": f"{direction}: {m.get('subject', '')}", "body": m.get("snippet", ""), "source": "gmail"})
+
+            timeline_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+            if not timeline_items:
+                st.caption("No activity yet. Send an email or log a call to start the timeline.")
+            else:
+                current_month = ""
+                st.markdown('<div class="timeline">', unsafe_allow_html=True)
+                for item in timeline_items:
+                    try:
+                        dt = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+                        month_label = dt.strftime("%B %Y")
+                        date_label = dt.strftime("%b %d, %Y %H:%M")
+                    except Exception:
+                        month_label = ""
+                        date_label = item["timestamp"][:10] if item["timestamp"] else ""
+                    if month_label and month_label != current_month:
+                        current_month = month_label
+                        st.markdown(f'<div class="timeline-month">{esc(month_label)}</div>', unsafe_allow_html=True)
+                    dot_cls = {"email": "timeline-dot-email", "call": "timeline-dot-call", "note": "timeline-dot-note", "gmail": "timeline-dot-gmail"}.get(item["type"], "timeline-dot-note")
+                    type_label = {"email": "Email logged", "call": "Call logged", "note": "Note", "gmail": "Gmail"}.get(item["type"], item["type"])
+                    body_html = f'<div class="timeline-body">{esc(item["body"][:500])}</div>' if item["body"] else ""
+                    st.markdown(f"""<div class="timeline-item">
+                        <div class="timeline-dot {dot_cls}"></div>
+                        <div class="timeline-date">{esc(date_label)} · {esc(type_label)}</div>
+                        <div class="timeline-title">{esc(item['title'])}</div>
+                        {body_html}
+                    </div>""", unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+    st.stop()
+
+# ─── Tabs (normal view) ───────────────────────────────────────────────────
 tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
     ["Deals", "Contacts", "Lead detail", "Today", "Bulk email", "Sequences", "Dashboard", "Add lead", "Import", "Templates", "Settings"]
 )
@@ -581,6 +844,7 @@ with tab_pipeline:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+                st.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
             if len(stage_df) > CARDS_PER_COL:
                 st.caption(f"+{len(stage_df) - CARDS_PER_COL} more")
             st.markdown(f'<div class="kanban-footer">Total: {len(stage_df)}</div>', unsafe_allow_html=True)
@@ -602,11 +866,11 @@ with tab_pipeline:
     )
     if st.button("Save changes", type="primary", key="p_save"):
         for _, row in edited.iterrows():
-            idx = df.index[df["id"] == row["id"]]
-            if len(idx):
-                for c in ["stage", "next_action", "next_action_date"]:
-                    df.at[idx[0], c] = row[c]
-        save_crm(df)
+            save_lead(row["id"], {
+                "stage": row["stage"],
+                "next_action": row["next_action"],
+                "next_action_date": row["next_action_date"],
+            })
         st.success("Saved")
         st.rerun()
 
@@ -634,47 +898,23 @@ with tab_contacts:
 
     st.caption(f"{len(cview)} contacts")
 
-    PILL_MAP = {
-        "New": "stage-pill-new", "Contacted": "stage-pill-contacted",
-        "Demo Booked": "stage-pill-demo", "Proposal": "stage-pill-proposal",
-        "Won": "stage-pill-won", "Lost": "stage-pill-lost",
-    }
-
     page_size = 50
     total_pages = max(1, (len(cview) + page_size - 1) // page_size)
     page = st.number_input("Page", 1, total_pages, 1, key="c_page")
     page_df = cview.iloc[(page-1)*page_size : page*page_size]
 
-    esc = html_mod.escape
-    rows_html = ""
     for _, r in page_df.iterrows():
         pill_cls = PILL_MAP.get(r["stage"], "stage-pill-new")
-        phone_display = esc(r["phone"]) if r["phone"] else "--"
-        rows_html += f"""<tr>
-            <td><span class="contact-name">{esc(r['contact_name'] or '--')}</span></td>
-            <td><span class="contact-email">{esc(r['email'] or '--')}</span></td>
-            <td>{phone_display}</td>
-            <td>{esc(r['business_name'])}</td>
-            <td><span class="contact-stage {pill_cls}">{esc(r['stage'])}</span></td>
-            <td>{esc(r['category'] or '--')}</td>
-            <td>{esc(r['region'] or '--')}</td>
-            <td>{esc(r['last_touch'] or 'Never')}</td>
-        </tr>"""
+        cc1, cc2, cc3, cc4, cc5 = st.columns([2, 2, 1, 1, 0.5])
+        cc1.markdown(f"**{r['contact_name'] or '--'}**  \n{r['business_name']}")
+        cc2.markdown(f"{r['email'] or '--'}  \n{r['phone'] or '--'}")
+        cc3.markdown(f"<span class='contact-stage {pill_cls}'>{r['stage']}</span>", unsafe_allow_html=True)
+        cc4.caption(f"{r['region'] or '--'} · {r['category'] or '--'}")
+        cc5.button("View", key=f"ct_{r['id']}", on_click=open_profile, args=(r["id"],))
 
-    table_html = f"""
-    <table class="contact-table">
-        <thead><tr>
-            <th>Name</th><th>Email</th><th>Phone</th>
-            <th>Company</th><th>Status</th><th>Category</th>
-            <th>Region</th><th>Last Activity</th>
-        </tr></thead>
-        <tbody>{rows_html}</tbody>
-    </table>
-    """
-    st.markdown(table_html, unsafe_allow_html=True)
     st.caption(f"Page {page} of {total_pages}")
 
-# ─── Lead detail (HubSpot contact profile) ──────────────────────────────────
+# ─── Lead detail (quick pick → profile view) ─────────────────────────────
 with tab_lead:
     if df.empty:
         st.info("No leads yet. Import some.")
@@ -682,6 +922,7 @@ with tab_lead:
         labels = (df["id"] + " — " + df["business_name"] + " (" + df["stage"] + ")").tolist()
         sel = st.selectbox("Pick lead", labels, key="lead_select")
         lead_id = sel.split(" — ")[0]
+        st.button("Open profile →", key="ld_open", on_click=open_profile, args=(lead_id,))
         lead = df[df["id"] == lead_id].iloc[0].to_dict()
         templates = load_templates()
         esc = html_mod.escape
@@ -749,15 +990,15 @@ with tab_lead:
                 new_na = st.text_input("Next action", lead["next_action"], key="d_na")
                 new_notes = st.text_area("Notes", lead["notes"], height=80, key="d_notes")
                 if st.button("Save", type="primary", key="d_save"):
-                    idx = df.index[df["id"] == lead_id][0]
-                    df.at[idx, "contact_name"] = new_contact
-                    df.at[idx, "phone"] = new_phone
-                    df.at[idx, "email"] = new_email
-                    df.at[idx, "stage"] = new_stage
-                    df.at[idx, "next_action_date"] = new_nad.isoformat() if new_nad else ""
-                    df.at[idx, "next_action"] = new_na
-                    df.at[idx, "notes"] = new_notes
-                    save_crm(df)
+                    save_lead(lead_id, {
+                        "contact_name": new_contact,
+                        "phone": new_phone,
+                        "email": new_email,
+                        "stage": new_stage,
+                        "next_action_date": new_nad.isoformat() if new_nad else "",
+                        "next_action": new_na,
+                        "notes": new_notes,
+                    })
                     st.rerun()
 
         # ── Right: Actions + Timeline ──
@@ -792,11 +1033,10 @@ with tab_lead:
                     st.warning("No email on lead")
                 if st.button("Log as sent", key="d_logsent"):
                     log_activity(lead_id, lead["business_name"], "email", subj, body)
-                    idx = df.index[df["id"] == lead_id][0]
-                    df.at[idx, "last_touch"] = date.today().isoformat()
-                    if df.at[idx, "stage"] == "New":
-                        df.at[idx, "stage"] = "Contacted"
-                    save_crm(df)
+                    updates = {"last_touch": date.today().isoformat()}
+                    if lead["stage"] == "New":
+                        updates["stage"] = "Contacted"
+                    save_lead(lead_id, updates)
                     st.rerun()
 
             elif act_tab == "Call / Note":
@@ -808,11 +1048,10 @@ with tab_lead:
                 if st.button("Log " + call_type, type="primary", key="d_clog"):
                     if call_subj or call_body:
                         log_activity(lead_id, lead["business_name"], call_type, call_subj, call_body)
-                        idx = df.index[df["id"] == lead_id][0]
-                        df.at[idx, "last_touch"] = date.today().isoformat()
-                        if call_type == "call" and df.at[idx, "stage"] == "New":
-                            df.at[idx, "stage"] = "Contacted"
-                        save_crm(df)
+                        updates = {"last_touch": date.today().isoformat()}
+                        if call_type == "call" and lead["stage"] == "New":
+                            updates["stage"] = "Contacted"
+                        save_lead(lead_id, updates)
                         st.rerun()
                     else:
                         st.error("Add subject or details")
@@ -966,11 +1205,10 @@ with tab_bulk:
                 gm = gmail_link(lead["email"], s, b)
                 links.append({"business": lead["business_name"], "email": lead["email"], "link": gm})
                 log_activity(lead["id"], lead["business_name"], "email", s, b)
-                idx = df.index[df["id"] == lead["id"]][0]
-                df.at[idx, "last_touch"] = date.today().isoformat()
-                if df.at[idx, "stage"] == "New":
-                    df.at[idx, "stage"] = "Contacted"
-            save_crm(df)
+                updates = {"last_touch": date.today().isoformat()}
+                if lead["stage"] == "New":
+                    updates["stage"] = "Contacted"
+                save_lead(lead["id"], updates)
             st.success(f"Logged {len(links)} emails. Click links below to open Gmail compose:")
             for lnk in links:
                 st.markdown(f"- [{lnk['business']}]({lnk['link']}) — {lnk['email']}")
@@ -1015,22 +1253,20 @@ with tab_sequences:
                         elif channel == "call" and lead.get("phone"):
                             col2.markdown(f"[Call {lead['phone']}](tel:{lead['phone']})")
                         if col3.button("Done", key=f"seq_done_{i}"):
-                            mask = ((seq_q["lead_id"] == task["lead_id"])
-                                    & (seq_q["sequence_name"] == task["sequence_name"])
-                                    & (seq_q["step"] == task["step"]))
-                            seq_q.loc[mask, "status"] = "done"
-                            save_seq_queue(seq_q)
+                            sb.table("sequence_queue").update({"status": "done"}).eq(
+                                "lead_id", int(task["lead_id"])
+                            ).eq("sequence_name", task["sequence_name"]).eq(
+                                "step", int(task["step"])
+                            ).execute()
                             if channel == "email" and tmpl_name and tmpl_name in templates:
                                 s, b = render_template(templates[tmpl_name], lead)
                                 log_activity(lead["id"], lead["business_name"], "email", s, b)
                             elif channel == "call":
                                 log_activity(lead["id"], lead["business_name"], "call", f"Sequence {task['sequence_name']} step {step_idx+1}", "")
-                            idx = df.index[df["id"] == task["lead_id"]]
-                            if len(idx):
-                                df.at[idx[0], "last_touch"] = date.today().isoformat()
-                                if df.at[idx[0], "stage"] == "New":
-                                    df.at[idx[0], "stage"] = "Contacted"
-                            save_crm(df)
+                            updates = {"last_touch": date.today().isoformat()}
+                            if lead.get("stage") == "New":
+                                updates["stage"] = "Contacted"
+                            save_lead(task["lead_id"], updates)
                             st.rerun()
                         st.divider()
 
@@ -1158,15 +1394,15 @@ with tab_add:
                 st.error("Business name required")
             else:
                 new = {
-                    "id": next_id(df), "business_name": biz, "contact_name": contact,
-                    "phone": phone, "email": email, "region": region, "category": category,
-                    "stage": stage, "last_touch": "",
-                    "next_action_date": nad.isoformat() if nad else "",
-                    "next_action": na, "notes": notes, "source": "manual",
+                    "id": int(next_id(df)), "business_name": biz, "contact_name": contact or None,
+                    "phone": phone or None, "email": email or None, "region": region or None,
+                    "category": category or None, "stage": stage,
+                    "last_touch": None,
+                    "next_action_date": nad.isoformat() if nad else None,
+                    "next_action": na or None, "notes": notes or None, "source": "manual",
                     "created": date.today().isoformat(),
                 }
-                df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
-                save_crm(df)
+                sb.table("leads").insert(new).execute()
                 st.success(f"Added {biz}")
 
 # ─── Import ──────────────────────────────────────────────────────────────────
@@ -1181,7 +1417,6 @@ with tab_import:
         st.caption("Generic inbox emails (info@/hello@ etc) auto-filtered. Duplicates by business name skipped.")
         if st.button("Import", type="primary"):
             df, added = import_leads(df, LEADS_SRC, rf, lim)
-            save_crm(df)
             st.success(f"Imported {added} new leads")
             st.rerun()
     else:
@@ -1194,7 +1429,6 @@ with tab_import:
         tmp = ROOT / "_upload.csv"
         tmp.write_bytes(up.read())
         df, added = import_leads(df, tmp, None, None)
-        save_crm(df)
         tmp.unlink()
         st.success(f"Imported {added} new leads")
         st.rerun()
@@ -1297,6 +1531,7 @@ with tab_settings:
     st.subheader("Danger")
     if st.checkbox("I want to wipe all CRM data"):
         if st.button("WIPE", type="primary"):
-            if DATA.exists():
-                DATA.unlink()
+            sb.table("leads").delete().neq("id", -999).execute()
+            sb.table("activity").delete().neq("id", -999).execute()
+            sb.table("sequence_queue").delete().neq("lead_id", -999).execute()
             st.success("Wiped. Reload.")
