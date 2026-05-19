@@ -416,201 +416,265 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 HUBSPOT_CSS = """
 <style>
-/* Force light mode */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+/* ── Base ── */
 .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
 [data-testid="stToolbar"], [data-testid="stDecoration"] {
-    background-color: #ffffff !important;
-    color: #33475b !important;
-    font-family: 'Lexend Deca', 'Inter', sans-serif;
+    background-color: #f8f9fb !important;
+    color: #1a1a2e !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
-section[data-testid="stSidebar"] { background: #f5f8fa !important; }
-label, .stMarkdown, .stCaption, p, span, div { color: #33475b !important; }
+section[data-testid="stSidebar"] { background: #1a1a2e !important; }
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div { color: #c4c4d4 !important; }
+label, .stMarkdown, .stCaption, p, span, div { color: #1a1a2e !important; }
 input, textarea, select, [data-testid="stTextInput"] input,
 [data-testid="stTextArea"] textarea {
-    background-color: #fff !important; color: #33475b !important;
-    border-color: #dfe3eb !important;
+    background-color: #fff !important; color: #1a1a2e !important;
+    border: 1px solid #e2e4e9 !important; border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
 }
-[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
-    background: #fff !important;
-}
-.stTabs [data-baseweb="tab-list"] { background: #f5f8fa !important; }
-.stTabs [data-baseweb="tab"] { color: #33475b !important; }
-.stSelectbox > div > div { background: #fff !important; color: #33475b !important; }
+input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 3px rgba(124,58,237,0.1) !important; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] { background: #fff !important; border-radius: 12px !important; }
 
-/* KPI bar */
-.kpi-bar { display:flex; gap:12px; margin-bottom:16px; }
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #fff !important; border-radius: 12px !important;
+    padding: 4px !important; gap: 2px !important;
+    border: 1px solid #e2e4e9 !important; margin-bottom: 20px !important;
+}
+.stTabs [data-baseweb="tab"] {
+    color: #64748b !important; font-weight: 500 !important; font-size: 13px !important;
+    border-radius: 8px !important; padding: 8px 16px !important;
+    font-family: 'Inter', sans-serif !important;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background: #7c3aed !important; color: #fff !important;
+}
+.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+.stTabs [data-baseweb="tab-border"] { display: none !important; }
+
+/* ── Buttons ── */
+.stButton > button {
+    border-radius: 8px !important; font-weight: 500 !important;
+    font-size: 13px !important; padding: 8px 16px !important;
+    border: 1px solid #e2e4e9 !important; background: #fff !important;
+    color: #1a1a2e !important; transition: all 0.15s !important;
+    font-family: 'Inter', sans-serif !important;
+}
+.stButton > button:hover { border-color: #7c3aed !important; color: #7c3aed !important; background: #faf5ff !important; }
+.stButton > button[kind="primary"], button[data-testid="stFormSubmitButton"] {
+    background: #7c3aed !important; color: #fff !important;
+    border-color: #7c3aed !important;
+}
+.stButton > button[kind="primary"]:hover { background: #6d28d9 !important; }
+.stSelectbox > div > div { background: #fff !important; color: #1a1a2e !important; border-radius: 8px !important; }
+
+/* ── Header bar ── */
+.crm-header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #2d1b69 100%);
+    border-radius: 16px; padding: 28px 32px; margin-bottom: 24px;
+    display: flex; align-items: center; justify-content: space-between;
+}
+.crm-header .logo { font-size: 26px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+.crm-header .logo span { color: #a78bfa; }
+.crm-header .subtitle { font-size: 13px; color: #a5a5c0; margin-top: 2px; }
+
+/* ── KPI bar ── */
+.kpi-bar { display: flex; gap: 16px; margin-bottom: 20px; }
 .kpi-card {
-    flex:1; background:#fff; border:1px solid #dfe3eb; border-radius:8px;
-    padding:16px 20px; text-align:center;
+    flex: 1; background: #fff; border: 1px solid #e2e4e9; border-radius: 12px;
+    padding: 20px 24px; text-align: center; transition: all 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
-.kpi-card .num { font-size:28px; font-weight:700; color:#33475b; }
-.kpi-card .label { font-size:12px; color:#7c98b6; text-transform:uppercase; letter-spacing:0.5px; }
-.kpi-card .sub { font-size:11px; color:#99acc2; }
+.kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.kpi-card .num { font-size: 32px; font-weight: 700; color: #1a1a2e; line-height: 1.1; }
+.kpi-card .label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; font-weight: 600; }
+.kpi-card .sub { font-size: 11px; color: #a78bfa; font-weight: 500; margin-top: 2px; }
 
-/* Kanban board */
-.kanban-board { display:flex; gap:12px; overflow-x:auto; padding-bottom:12px; }
-.kanban-col {
-    min-width:220px; max-width:260px; flex:1;
-    background:#f5f8fa; border-radius:8px; padding:0;
-}
+/* ── Progress bar ── */
+.target-bar { background: #e2e4e9; border-radius: 20px; height: 8px; margin: 8px 0 24px; overflow: hidden; }
+.target-fill { background: linear-gradient(90deg, #7c3aed, #a78bfa); height: 8px; border-radius: 20px; transition: width 0.5s; }
+
+/* ── Kanban ── */
 .kanban-header {
-    padding:12px 16px; font-weight:600; font-size:13px; color:#33475b;
-    border-bottom:2px solid; text-transform:uppercase; letter-spacing:0.3px;
+    padding: 14px 16px; font-weight: 600; font-size: 12px; color: #1a1a2e;
+    border-bottom: 3px solid; text-transform: uppercase; letter-spacing: 0.8px;
+    background: #fff; border-radius: 12px 12px 0 0;
 }
-.kanban-header .count { font-weight:400; color:#7c98b6; margin-left:6px; }
-.kanban-cards { padding:8px; max-height:520px; overflow-y:auto; }
+.kanban-header .count { font-weight: 500; color: #94a3b8; margin-left: 8px; font-size: 12px; }
 .deal-card {
-    background:#fff; border:1px solid #dfe3eb; border-radius:6px;
-    padding:12px 14px; margin-bottom:8px; cursor:pointer;
-    transition: box-shadow 0.15s;
+    background: #fff; border: 1px solid #e2e4e9; border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+    transition: all 0.15s; border-left: 3px solid transparent;
 }
-.deal-card:hover { box-shadow:0 2px 8px rgba(0,0,0,0.1); }
-.deal-card .biz { font-weight:600; font-size:13px; color:#33475b; margin-bottom:4px; }
-.deal-card .contact { font-size:12px; color:#516f90; }
-.deal-card .meta { font-size:11px; color:#99acc2; margin-top:6px; }
+.deal-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateY(-1px); border-left-color: #7c3aed; }
+.deal-card .biz { font-weight: 600; font-size: 13px; color: #1a1a2e; margin-bottom: 3px; }
+.deal-card .contact { font-size: 12px; color: #64748b; font-weight: 400; }
+.deal-card .meta { font-size: 11px; color: #94a3b8; margin-top: 8px; }
 .deal-card .category-tag {
-    display:inline-block; background:#eaf0f6; color:#516f90;
-    font-size:10px; padding:2px 8px; border-radius:10px; margin-top:4px;
+    display: inline-block; background: #f1f0ff; color: #7c3aed;
+    font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
 }
 .kanban-footer {
-    padding:8px 16px; font-size:11px; color:#7c98b6;
-    border-top:1px solid #dfe3eb;
+    padding: 10px 16px; font-size: 11px; color: #94a3b8; font-weight: 500;
+    border-top: 1px solid #e2e4e9; background: #fafafa; border-radius: 0 0 12px 12px;
 }
 
-/* Stage colors */
-.stage-new { border-color:#00bda5; }
-.stage-contacted { border-color:#00a4bd; }
-.stage-demo { border-color:#6a78d1; }
-.stage-proposal { border-color:#f5c26b; }
-.stage-won { border-color:#00bda5; }
-.stage-lost { border-color:#f2545b; }
+/* ── Stage colors ── */
+.stage-new { border-color: #10b981; }
+.stage-contacted { border-color: #3b82f6; }
+.stage-demo { border-color: #7c3aed; }
+.stage-proposal { border-color: #f59e0b; }
+.stage-won { border-color: #10b981; }
+.stage-lost { border-color: #ef4444; }
 
-/* Contact table */
-.contact-table { border-collapse:collapse; width:100%; font-size:13px; }
+/* ── Contact table ── */
+.contact-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .contact-table th {
-    text-align:left; padding:10px 14px; background:#f5f8fa;
-    color:#7c98b6; font-weight:600; font-size:11px;
-    text-transform:uppercase; letter-spacing:0.5px;
-    border-bottom:2px solid #dfe3eb;
+    text-align: left; padding: 12px 16px; background: #f8f9fb;
+    color: #94a3b8; font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.8px;
+    border-bottom: 2px solid #e2e4e9;
 }
-.contact-table td {
-    padding:10px 14px; border-bottom:1px solid #eaf0f6; color:#33475b;
-}
-.contact-table tr:hover td { background:#f5f8fa; }
-.contact-name { font-weight:600; color:#0091ae; }
-.contact-email { color:#516f90; }
-.contact-stage {
-    display:inline-block; padding:2px 10px; border-radius:10px;
-    font-size:11px; font-weight:600;
-}
-.stage-pill-new { background:#e5f5f3; color:#00bda5; }
-.stage-pill-contacted { background:#e5f4f7; color:#00a4bd; }
-.stage-pill-demo { background:#ededf9; color:#6a78d1; }
-.stage-pill-proposal { background:#fef5e5; color:#d4940a; }
-.stage-pill-won { background:#e5f5f3; color:#00875a; }
-.stage-pill-lost { background:#fde8e9; color:#f2545b; }
+.contact-table td { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; color: #1a1a2e; }
+.contact-table tr:hover td { background: #faf5ff; }
+.contact-name { font-weight: 600; color: #7c3aed; }
+.contact-email { color: #64748b; }
+.contact-stage { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.stage-pill-new { background: #ecfdf5; color: #10b981; }
+.stage-pill-contacted { background: #eff6ff; color: #3b82f6; }
+.stage-pill-demo { background: #f5f3ff; color: #7c3aed; }
+.stage-pill-proposal { background: #fffbeb; color: #d97706; }
+.stage-pill-won { background: #ecfdf5; color: #059669; }
+.stage-pill-lost { background: #fef2f2; color: #ef4444; }
 
-/* Template editor */
-.tmpl-editor {
-    background:#fff; border:1px solid #dfe3eb; border-radius:8px;
-    overflow:hidden;
-}
-.tmpl-header {
-    padding:16px 20px; border-bottom:1px solid #dfe3eb;
-    display:flex; justify-content:space-between; align-items:center;
-}
-.tmpl-header h3 { margin:0; font-size:16px; color:#33475b; }
-.tmpl-body { padding:20px; }
+/* ── Template editor ── */
+.tmpl-editor { background: #fff; border: 1px solid #e2e4e9; border-radius: 12px; overflow: hidden; }
+.tmpl-header { padding: 18px 24px; border-bottom: 1px solid #e2e4e9; }
+.tmpl-header h3 { margin: 0; font-size: 16px; color: #1a1a2e; font-weight: 600; }
+.tmpl-body { padding: 24px; }
 .tmpl-toolbar {
-    padding:8px 20px; border-top:1px solid #dfe3eb;
-    display:flex; gap:12px; align-items:center; background:#f5f8fa;
+    padding: 10px 24px; border-top: 1px solid #e2e4e9;
+    display: flex; gap: 10px; align-items: center; background: #f8f9fb;
 }
 .token-btn {
-    display:inline-block; background:#00bda5; color:#fff;
-    padding:4px 12px; border-radius:4px; font-size:12px;
-    cursor:pointer; border:none;
+    display: inline-block; background: #7c3aed; color: #fff;
+    padding: 5px 14px; border-radius: 6px; font-size: 12px; font-weight: 500;
+    cursor: pointer; border: none;
 }
-.tmpl-preview {
-    background:#f5f8fa; border:1px solid #dfe3eb; border-radius:8px;
-    padding:20px; margin-top:12px;
-}
-.tmpl-preview .preview-to { color:#7c98b6; font-size:12px; margin-bottom:4px; }
-.tmpl-preview .preview-subject { font-weight:600; font-size:14px; color:#33475b; margin-bottom:12px; }
-.tmpl-preview .preview-body { font-size:13px; color:#516f90; white-space:pre-wrap; line-height:1.6; }
+.tmpl-preview { background: #f8f9fb; border: 1px solid #e2e4e9; border-radius: 12px; padding: 24px; margin-top: 12px; }
+.tmpl-preview .preview-to { color: #94a3b8; font-size: 12px; margin-bottom: 4px; }
+.tmpl-preview .preview-subject { font-weight: 600; font-size: 15px; color: #1a1a2e; margin-bottom: 12px; }
+.tmpl-preview .preview-body { font-size: 13px; color: #64748b; white-space: pre-wrap; line-height: 1.7; }
 
-/* Progress bar */
-.target-bar { background:#eaf0f6; border-radius:20px; height:10px; margin:8px 0; }
-.target-fill { background:linear-gradient(90deg,#00bda5,#00a4bd); height:10px; border-radius:20px; transition:width 0.5s; }
-
-/* Contact profile */
+/* ── Profile card ── */
 .profile-card {
-    background:#fff; border:1px solid #dfe3eb; border-radius:8px;
-    padding:24px 20px; text-align:center;
+    background: #fff; border: 1px solid #e2e4e9; border-radius: 16px;
+    padding: 28px 24px; text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 .profile-avatar {
-    width:88px; height:88px; border-radius:50%; background:#7c98b6;
-    color:#fff; font-size:34px; font-weight:700; line-height:88px;
-    margin:0 auto 14px; text-transform:uppercase; letter-spacing:1px;
+    width: 80px; height: 80px; border-radius: 16px; background: linear-gradient(135deg, #7c3aed, #a78bfa);
+    color: #fff; font-size: 28px; font-weight: 700; line-height: 80px;
+    margin: 0 auto 16px; text-transform: uppercase; letter-spacing: 1px;
 }
-.profile-name { font-size:20px; font-weight:700; color:#33475b; margin-bottom:2px; }
-.profile-role { font-size:13px; color:#516f90; margin-bottom:4px; }
-.profile-email { font-size:13px; color:#516f90; margin-bottom:14px; }
-.profile-actions { display:flex; justify-content:center; gap:14px; margin:14px 0; flex-wrap:wrap; }
-.profile-action-item { display:flex; flex-direction:column; align-items:center; gap:4px; }
+.profile-name { font-size: 20px; font-weight: 700; color: #1a1a2e; margin-bottom: 2px; }
+.profile-role { font-size: 13px; color: #64748b; margin-bottom: 4px; font-weight: 500; }
+.profile-email { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }
+.profile-actions { display: flex; justify-content: center; gap: 16px; margin: 16px 0; flex-wrap: wrap; }
+.profile-action-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .profile-action-btn {
-    width:38px; height:38px; border-radius:50%; border:1px solid #dfe3eb;
-    background:#fff; color:#516f90; font-size:16px; cursor:pointer;
-    display:inline-flex; align-items:center; justify-content:center;
-    text-decoration:none; transition:all 0.15s;
+    width: 42px; height: 42px; border-radius: 12px; border: 1px solid #e2e4e9;
+    background: #fff; color: #64748b; font-size: 16px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    text-decoration: none; transition: all 0.15s;
 }
-.profile-action-btn:hover { background:#eaf0f6; border-color:#00bda5; color:#00bda5; }
-.profile-action-label { font-size:10px; color:#7c98b6; }
-.profile-section {
-    text-align:left; border-top:1px solid #eaf0f6; padding-top:14px; margin-top:14px;
-}
-.profile-section-header {
-    display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;
-}
-.profile-section-title {
-    font-size:12px; font-weight:600; color:#33475b;
-}
-.profile-section-action { font-size:11px; color:#0091ae; cursor:pointer; }
-.profile-field { margin-bottom:10px; }
-.profile-field-label { font-size:11px; color:#7c98b6; margin-bottom:1px; }
-.profile-field-value { font-size:13px; color:#33475b; font-weight:500; }
+.profile-action-btn:hover { background: #faf5ff; border-color: #7c3aed; color: #7c3aed; }
+.profile-action-label { font-size: 10px; color: #94a3b8; font-weight: 500; }
+.profile-section { text-align: left; border-top: 1px solid #f1f5f9; padding-top: 16px; margin-top: 16px; }
+.profile-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.profile-section-title { font-size: 12px; font-weight: 600; color: #1a1a2e; text-transform: uppercase; letter-spacing: 0.5px; }
+.profile-section-action { font-size: 11px; color: #7c3aed; cursor: pointer; font-weight: 500; }
+.profile-field { margin-bottom: 12px; }
+.profile-field-label { font-size: 11px; color: #94a3b8; margin-bottom: 2px; font-weight: 500; }
+.profile-field-value { font-size: 13px; color: #1a1a2e; font-weight: 500; }
 
-/* Timeline */
-.timeline { position:relative; padding-left:24px; }
-.timeline::before {
-    content:''; position:absolute; left:8px; top:0; bottom:0;
-    width:2px; background:#dfe3eb;
-}
-.timeline-item { position:relative; margin-bottom:20px; }
+/* ── Timeline ── */
+.timeline { position: relative; padding-left: 28px; }
+.timeline::before { content: ''; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: #e2e4e9; }
+.timeline-item { position: relative; margin-bottom: 20px; }
 .timeline-dot {
-    position:absolute; left:-20px; top:4px; width:12px; height:12px;
-    border-radius:50%; border:2px solid #fff;
+    position: absolute; left: -23px; top: 4px; width: 14px; height: 14px;
+    border-radius: 50%; border: 2.5px solid #fff; box-shadow: 0 0 0 1px #e2e4e9;
 }
-.timeline-dot-email { background:#00a4bd; }
-.timeline-dot-call { background:#00bda5; }
-.timeline-dot-note { background:#6a78d1; }
-.timeline-dot-gmail { background:#ea4335; }
-.timeline-date { font-size:11px; color:#7c98b6; margin-bottom:2px; }
-.timeline-title { font-size:13px; font-weight:600; color:#33475b; margin-bottom:4px; }
+.timeline-dot-email { background: #3b82f6; }
+.timeline-dot-call { background: #10b981; }
+.timeline-dot-note { background: #7c3aed; }
+.timeline-dot-gmail { background: #ef4444; }
+.timeline-date { font-size: 11px; color: #94a3b8; margin-bottom: 3px; font-weight: 500; }
+.timeline-title { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-bottom: 4px; }
 .timeline-body {
-    font-size:12px; color:#516f90; background:#f5f8fa;
-    border-radius:6px; padding:10px 14px; white-space:pre-wrap;
-    max-height:200px; overflow-y:auto; line-height:1.5;
+    font-size: 12px; color: #64748b; background: #f8f9fb;
+    border-radius: 10px; padding: 12px 16px; white-space: pre-wrap;
+    max-height: 200px; overflow-y: auto; line-height: 1.6;
+    border: 1px solid #e2e4e9;
 }
 .timeline-month {
-    font-size:13px; font-weight:700; color:#33475b; margin:20px 0 12px;
-    padding-bottom:4px; border-bottom:1px solid #eaf0f6;
+    font-size: 13px; font-weight: 700; color: #1a1a2e; margin: 24px 0 12px;
+    padding-bottom: 6px; border-bottom: 2px solid #e2e4e9;
 }
+
+/* ── Search bar ── */
+.search-wrap {
+    background: #fff; border-radius: 12px; border: 1px solid #e2e4e9;
+    padding: 4px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+
+/* ── Card containers ── */
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"] {
+    border: 1px solid #e2e4e9 !important; border-radius: 10px !important;
+    padding: 10px 12px 6px !important; margin-bottom: 8px !important;
+    background: #fff !important; transition: all 0.15s;
+}
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"]:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.06); border-color: #c4b5fd !important;
+}
+.deal-card-inner .biz { font-weight: 600; font-size: 13px; color: #1a1a2e; margin-bottom: 3px; }
+.deal-card-inner .contact { font-size: 12px; color: #64748b; }
+.deal-card-inner .meta { font-size: 11px; color: #94a3b8; margin-top: 6px; }
+.deal-card-inner .category-tag {
+    display: inline-block; background: #f1f0ff; color: #7c3aed;
+    font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
+}
+/* Compact buttons inside cards */
+[data-testid="stContainer"] .stButton > button {
+    padding: 4px 12px !important; font-size: 11px !important;
+    height: auto !important; min-height: 0 !important;
+}
+[data-testid="stContainer"] .stSelectbox { margin-top: -8px; }
+[data-testid="stContainer"] .stSelectbox > div > div {
+    min-height: 0 !important; padding: 2px 8px !important; font-size: 11px !important;
+}
+
+/* ── Misc ── */
+.stDivider { border-color: #e2e4e9 !important; }
+hr { border-color: #e2e4e9 !important; }
+[data-testid="stForm"] { background: #fff !important; border: 1px solid #e2e4e9 !important; border-radius: 12px !important; padding: 24px !important; }
+.stMultiSelect > div { border-radius: 8px !important; }
 </style>
 """
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Yetipay CRM", layout="wide")
+st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳")
 st.markdown(HUBSPOT_CSS, unsafe_allow_html=True)
+st.markdown("""<div class="crm-header">
+    <div><div class="logo">JOE'S <span>CRM</span></div>
+    <div class="subtitle">Yetipay Sales Pipeline &amp; Outreach Manager</div></div>
+</div>""", unsafe_allow_html=True)
 cfg = load_config()
 df = load_crm()
 
@@ -655,13 +719,15 @@ days_left = (date(date.today().year, date.today().month % 12 + 1, 1) - date.toda
 in_pipe = len(df[~df["stage"].isin(["Won", "Lost"])])
 pct = min(won / target, 1.0) if target else 0
 
+contacted = len(df[df["stage"] == "Contacted"])
 st.markdown(f"""
 <div class="kpi-bar">
-    <div class="kpi-card"><div class="num">{won}</div><div class="label">Won</div><div class="sub">target {target}</div></div>
-    <div class="kpi-card"><div class="num">{remaining}</div><div class="label">Remaining</div></div>
-    <div class="kpi-card"><div class="num">{days_left}</div><div class="label">Days left</div></div>
-    <div class="kpi-card"><div class="num">{in_pipe}</div><div class="label">Pipeline</div></div>
-    <div class="kpi-card"><div class="num">{len(df)}</div><div class="label">Total leads</div></div>
+    <div class="kpi-card" style="background:#ecfdf5; border-color:#d1fae5;"><div class="num" style="color:#059669;">{won}/{target}</div><div class="label">Deals Won</div><div class="sub">{pct*100:.0f}% of target</div></div>
+    <div class="kpi-card" style="background:#fef3c7; border-color:#fde68a;"><div class="num" style="color:#d97706;">{remaining}</div><div class="label">To Go</div></div>
+    <div class="kpi-card" style="background:#fef2f2; border-color:#fecaca;"><div class="num" style="color:#dc2626;">{days_left}</div><div class="label">Days Left</div></div>
+    <div class="kpi-card" style="background:#eff6ff; border-color:#bfdbfe;"><div class="num" style="color:#2563eb;">{contacted}</div><div class="label">Contacted</div></div>
+    <div class="kpi-card" style="background:#f5f3ff; border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">{in_pipe:,}</div><div class="label">In Pipeline</div></div>
+    <div class="kpi-card" style="background:#f8f9fb; border-color:#e2e4e9;"><div class="num">{len(df):,}</div><div class="label">Total Leads</div></div>
 </div>
 <div class="target-bar"><div class="target-fill" style="width:{pct*100:.0f}%"></div></div>
 """, unsafe_allow_html=True)
@@ -839,7 +905,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
 
 # ─── Tabs (normal view) ───────────────────────────────────────────────────
 tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
-    ["Deals", "Contacts", "Lead detail", "Today", "Bulk email", "Sequences", "Dashboard", "Add lead", "Import", "Templates", "Settings"]
+    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
 )
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
@@ -901,9 +967,15 @@ with tab_pipeline:
     p_category = pf3.text_input("Category filter", key="p_category")
 
     view = df.copy()
-    view = view[view["pipeline"].isin([active_pipeline, ""])]
-    if active_pipeline == "Sales":
-        view = view[~view["stage"].isin(REFERRAL_STAGES)]
+    if active_pipeline == "Referral":
+        referral_only_stages = [s for s in REFERRAL_STAGES if s not in STAGES]
+        view = view[
+            (view["source"] == "referral_import")
+            | view["stage"].isin(referral_only_stages)
+        ]
+    else:
+        referral_only_stages = [s for s in REFERRAL_STAGES if s not in STAGES]
+        view = view[~view["stage"].isin(referral_only_stages)]
     if p_region:
         view = view[view["region"].str.contains(p_region, case=False, na=False)]
     if p_search:
@@ -942,22 +1014,23 @@ with tab_pipeline:
                 na = esc(row["next_action"] or "")
                 na_line = f'<div class="meta">Next: {na}</div>' if na else ""
                 cat_line = f'<span class="category-tag">{cat}</span>' if cat else ""
-                st.markdown(
-                    f'<div class="deal-card">'
-                    f'<div class="biz">{esc(row["business_name"])}</div>'
-                    f'<div class="contact">{esc(row["contact_name"])}</div>'
-                    f'<div class="meta">{esc(touch)}</div>'
-                    f'{na_line}{cat_line}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                bc1, bc2 = st.columns(2)
-                bc1.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
-                other_stages = [s for s in active_stages if s != stage]
-                new_s = bc2.selectbox("Move →", [stage] + other_stages, key=f"mv_{row['id']}", label_visibility="collapsed")
-                if new_s != stage:
-                    move_lead(row["id"], new_s)
-                    st.rerun()
+                with st.container(border=True):
+                    st.markdown(
+                        f'<div class="deal-card-inner">'
+                        f'<div class="biz">{esc(row["business_name"])}</div>'
+                        f'<div class="contact">{esc(row["contact_name"])}</div>'
+                        f'<div class="meta">{esc(touch)}</div>'
+                        f'{na_line}{cat_line}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    bc1, bc2 = st.columns([1, 2])
+                    bc1.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
+                    other_stages = [s for s in active_stages if s != stage]
+                    new_s = bc2.selectbox("Move", [stage] + other_stages, key=f"mv_{row['id']}", label_visibility="collapsed")
+                    if new_s != stage:
+                        move_lead(row["id"], new_s)
+                        st.rerun()
 
             remaining = len(stage_df) - show_count
             if remaining > 0:
