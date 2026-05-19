@@ -818,18 +818,29 @@ with tab_pipeline:
     if p_category:
         view = view[view["category"].str.contains(p_category, case=False, na=False)]
 
-    CARDS_PER_COL = 8
+    CARDS_DEFAULT = 8
     esc = html_mod.escape
+
+    # Track expanded columns
+    if "kanban_expanded" not in st.session_state:
+        st.session_state["kanban_expanded"] = {}
+
+    def move_lead(lid, new_stage):
+        save_lead(lid, {"stage": new_stage})
+
     cols = st.columns(len(STAGES))
     for i, stage in enumerate(STAGES):
         stage_df = view[view["stage"] == stage]
         cls = STAGE_CLASSES.get(stage, "stage-new")
+        expanded = st.session_state["kanban_expanded"].get(stage, False)
+        show_count = len(stage_df) if expanded else CARDS_DEFAULT
+
         with cols[i]:
             st.markdown(
                 f'<div class="kanban-header {cls}">{stage}<span class="count"> {len(stage_df)}</span></div>',
                 unsafe_allow_html=True,
             )
-            for _, row in stage_df.head(CARDS_PER_COL).iterrows():
+            for _, row in stage_df.head(show_count).iterrows():
                 touch = row["last_touch"] or "No activity"
                 cat = esc(row["category"] or "")
                 na = esc(row["next_action"] or "")
@@ -844,9 +855,23 @@ with tab_pipeline:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
-                st.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
-            if len(stage_df) > CARDS_PER_COL:
-                st.caption(f"+{len(stage_df) - CARDS_PER_COL} more")
+                bc1, bc2 = st.columns(2)
+                bc1.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
+                other_stages = [s for s in STAGES if s != stage]
+                new_s = bc2.selectbox("Move →", [stage] + other_stages, key=f"mv_{row['id']}", label_visibility="collapsed")
+                if new_s != stage:
+                    move_lead(row["id"], new_s)
+                    st.rerun()
+
+            remaining = len(stage_df) - show_count
+            if remaining > 0:
+                if st.button(f"+{remaining} more", key=f"expand_{stage}"):
+                    st.session_state["kanban_expanded"][stage] = True
+                    st.rerun()
+            elif expanded and len(stage_df) > CARDS_DEFAULT:
+                if st.button("Show less", key=f"collapse_{stage}"):
+                    st.session_state["kanban_expanded"][stage] = False
+                    st.rerun()
             st.markdown(f'<div class="kanban-footer">Total: {len(stage_df)}</div>', unsafe_allow_html=True)
 
     st.divider()
