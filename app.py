@@ -1394,13 +1394,33 @@ with tab_bulk:
                     if lc3.button("Sent", key=f"bsent_{i}"):
                         tracker = load_send_counts()
                         log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                        save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                        lead_row = df[df["id"] == str(lnk["lead_id"])]
+                        updates = {"last_touch": date.today().isoformat()}
+                        if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                            updates["stage"] = "Contacted"
+                        save_lead(lnk["lead_id"], updates)
                         tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                         save_send_counts(tracker)
                         st.session_state["bulk_sent"].add(i)
                         st.rerun()
 
             st.divider()
+            unsent_links = [links[i]["link"] for i in unsent]
+            if unsent_links:
+                js_links = json.dumps(unsent_links)
+                import streamlit.components.v1 as comp2
+                comp2.html(
+                    f'''<button onclick="openAll()" style="background:#0d6efd;color:white;border:none;padding:10px 24px;
+                    border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;">🚀 Open all {len(unsent_links)} in new tabs</button>
+                    <script>
+                    function openAll() {{
+                        var links = {js_links};
+                        links.forEach(function(url) {{ window.open(url, '_blank'); }});
+                    }}
+                    </script>''',
+                    height=50,
+                )
+
             cc1, cc2, cc3, cc4 = st.columns(4)
             if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
                 try:
@@ -1412,7 +1432,11 @@ with tab_bulk:
                     for i, lnk in enumerate(links):
                         if i not in sent_set and lnk["email"].lower() in found:
                             log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                            save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                            lead_row = df[df["id"] == str(lnk["lead_id"])]
+                            updates = {"last_touch": date.today().isoformat()}
+                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                updates["stage"] = "Contacted"
+                            save_lead(lnk["lead_id"], updates)
                             tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                             st.session_state["bulk_sent"].add(i)
                             newly_confirmed += 1
@@ -1426,7 +1450,11 @@ with tab_bulk:
                 for i, lnk in enumerate(links):
                     if i not in sent_set:
                         log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                        save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                        lead_row = df[df["id"] == str(lnk["lead_id"])]
+                        updates = {"last_touch": date.today().isoformat()}
+                        if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                            updates["stage"] = "Contacted"
+                        save_lead(lnk["lead_id"], updates)
                         tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                 save_send_counts(tracker)
                 st.session_state["bulk_links"] = None
