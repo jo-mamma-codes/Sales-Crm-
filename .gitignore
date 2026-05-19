@@ -8,10 +8,15 @@ sequences.json
 bounced_emails.json
 send_tracker.json
 gmail_cache/
+gmail_credentials.json
+gmail_token.json
 _upload.csv
 
 # Migration (one-time)
 migrate_to_supabase.py
+
+# Secrets
+.env
 
 # Python
 __pycache__/

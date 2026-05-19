@@ -3,6 +3,9 @@ import html as html_mod
 import os
 import json
 import urllib.parse
+from dotenv import load_dotenv
+
+load_dotenv()
 from datetime import date, datetime
 from pathlib import Path
 
@@ -16,8 +19,8 @@ TEMPLATES = ROOT / "templates.json"
 LEADS_SRC = ROOT.parent / "data" / "ready_for_outreach.csv"
 SEQUENCES = ROOT / "sequences.json"
 
-SUPABASE_URL = "https://ndfgaqefiekgtcyzmmuj.supabase.co"
-SUPABASE_KEY = "sb_publishable_Okz9BDOjHA6rkAo6YVja5w_loiV4Unq"
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 @st.cache_resource
 def get_supabase():
@@ -123,6 +126,9 @@ def log_activity(lead_id, business_name, type_, subject, content):
     sb.table("activity").insert(row).execute()
 
 
+OPT_OUT_LINE = "\n\nTo opt out, reply 'unsubscribe'."
+
+
 def render_template(tmpl, lead):
     """Replace {{token}} placeholders with CRM record values."""
     subj, body = tmpl["subject"], tmpl["body"]
@@ -130,6 +136,8 @@ def render_template(tmpl, lead):
         val = transform(lead.get(field, ""))
         subj = subj.replace(token, val)
         body = body.replace(token, val)
+    if OPT_OUT_LINE.strip() not in body:
+        body += OPT_OUT_LINE
     return subj, body
 
 
@@ -1295,12 +1303,24 @@ with tab_bulk:
         pool = pool[~pool["email"].str.lower().str.startswith(
             ("info@", "hello@", "contact@", "enquiries@", "admin@", "sales@", "office@", "reception@", "bookings@")
         )]
+        only_new = st.checkbox("Only leads never emailed", value=True, key="b_only_new")
+        if only_new:
+            emailed_ids = set()
+            try:
+                act = sb.table("activity").select("lead_id").eq("type", "email").execute()
+                emailed_ids = {str(r["lead_id"]) for r in act.data} if act.data else set()
+            except Exception:
+                pass
+            pool = pool[~pool["id"].isin(emailed_ids)]
 
         st.caption(f"{len(pool)} leads match filters (personal email only)")
 
         limit = st.slider("How many to send", 1, min(len(pool), 200) if len(pool) > 0 else 1,
                           min(50, len(pool)) if len(pool) > 0 else 1, key="b_limit")
-        batch = pool.head(limit)
+        skip = st.session_state.get("bulk_skip_offset", 0)
+        if skip > 0:
+            st.caption(f"Skipped {skip} leads from previous batches")
+        batch = pool.iloc[skip:skip + limit]
 
         if not batch.empty:
             sample_lead = batch.iloc[0].to_dict()
@@ -1325,12 +1345,15 @@ with tab_bulk:
 
         if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
             links = []
-            skipped = 0
+            sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
             for _, row in batch.iterrows():
-                sender = pick_sender(tracker)
+                sender = None
+                for s in SENDERS:
+                    if sender_counts[s["email"]] < s["daily_cap"]:
+                        sender = s
+                        break
                 if not sender:
-                    skipped += 1
-                    continue
+                    break
                 lead = row.to_dict()
                 s, b = render_template(templates[tmpl_pick], lead)
                 gm = gmail_link(lead["email"], s, b, sender_email=sender["email"])
@@ -1339,53 +1362,87 @@ with tab_bulk:
                     "link": gm, "sender": sender["email"],
                     "lead_id": lead["id"], "subject": s, "body": b,
                 })
-                tracker["counts"][sender["email"]] = tracker["counts"].get(sender["email"], 0) + 1
+                sender_counts[sender["email"]] += 1
             st.session_state["bulk_links"] = links
-            st.session_state["bulk_skipped"] = skipped
-            save_send_counts(tracker)
             st.rerun()
 
         if st.session_state.get("bulk_links"):
             links = st.session_state["bulk_links"]
-            skipped = st.session_state.get("bulk_skipped", 0)
-            if skipped:
-                st.warning(f"Skipped {skipped} — all inboxes hit daily cap.")
-            st.info(f"{len(links)} compose links ready. Open them, send, then click **Confirm all sent** below.")
-            rows_html = ""
+            if "bulk_sent" not in st.session_state:
+                st.session_state["bulk_sent"] = set()
+            sent_set = st.session_state["bulk_sent"]
+            unsent = [i for i, l in enumerate(links) if i not in sent_set]
+            st.info(f"{len(links)} links generated. **{len(sent_set)}** confirmed sent, **{len(unsent)}** remaining.")
+
+            import streamlit.components.v1 as components
             current_sender = None
-            for lnk in links:
+            for i, lnk in enumerate(links):
                 if lnk["sender"] != current_sender:
                     current_sender = lnk["sender"]
-                    rows_html += f'<tr><td colspan="2" style="padding:10px 0 4px;font-weight:bold;font-size:14px;">From: {html_mod.escape(current_sender)}</td></tr>'
-                rows_html += (
-                    f'<tr>'
-                    f'<td style="padding:3px 8px 3px 0;"><a href="{html_mod.escape(lnk["link"])}" target="_blank" '
-                    f'rel="noopener" style="color:#0d6efd;text-decoration:none;">✉ {html_mod.escape(lnk["business"])}</a></td>'
-                    f'<td style="padding:3px 0;color:#666;">{html_mod.escape(lnk["email"])}</td>'
-                    f'</tr>'
-                )
-            import streamlit.components.v1 as components
-            components.html(
-                f'<table style="font-family:sans-serif;font-size:13px;width:100%;">{rows_html}</table>',
-                height=min(len(links) * 32 + 80, 800),
-                scrolling=True,
-            )
-            cc1, cc2 = st.columns(2)
+                    st.markdown(f"**From: {current_sender}**")
+                if i in sent_set:
+                    st.markdown(f"~~{lnk['business']}~~ — ✅ sent")
+                else:
+                    lc1, lc2, lc3 = st.columns([3, 3, 1])
+                    with lc1:
+                        components.html(
+                            f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
+                            f'style="color:#0d6efd;text-decoration:none;font-family:sans-serif;font-size:14px;">✉ {html_mod.escape(lnk["business"])}</a>',
+                            height=30,
+                        )
+                    lc2.caption(lnk["email"])
+                    if lc3.button("Sent", key=f"bsent_{i}"):
+                        tracker = load_send_counts()
+                        log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                        save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                        tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                        save_send_counts(tracker)
+                        st.session_state["bulk_sent"].add(i)
+                        st.rerun()
+
+            st.divider()
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
+                try:
+                    from gmail_auth import check_sent_emails
+                    unsent_emails = [links[i]["email"] for i in unsent]
+                    found = check_sent_emails(unsent_emails, hours_back=24)
+                    tracker = load_send_counts()
+                    newly_confirmed = 0
+                    for i, lnk in enumerate(links):
+                        if i not in sent_set and lnk["email"].lower() in found:
+                            log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                            save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                            tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                            st.session_state["bulk_sent"].add(i)
+                            newly_confirmed += 1
+                    save_send_counts(tracker)
+                    st.success(f"Found {newly_confirmed} sent emails in Gmail.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gmail check failed: {e}. Run `python3 gmail_auth.py` first.")
             if cc1.button("✅ Confirm all sent", type="primary", key="b_confirm"):
-                for lnk in links:
-                    log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                    updates = {"last_touch": date.today().isoformat()}
-                    save_lead(lnk["lead_id"], updates)
-                st.session_state["bulk_links"] = None
-                st.success(f"Logged {len(links)} emails as sent.")
-                st.rerun()
-            if cc2.button("❌ Cancel (not sent)", key="b_cancel"):
                 tracker = load_send_counts()
-                for lnk in links:
-                    tracker["counts"][lnk["sender"]] = max(0, tracker["counts"].get(lnk["sender"], 0) - 1)
+                for i, lnk in enumerate(links):
+                    if i not in sent_set:
+                        log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                        save_lead(lnk["lead_id"], {"last_touch": date.today().isoformat()})
+                        tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                 save_send_counts(tracker)
                 st.session_state["bulk_links"] = None
-                st.info("Cancelled. Send counts rolled back.")
+                st.session_state["bulk_sent"] = set()
+                st.success(f"Logged {len(links)} emails as sent.")
+                st.rerun()
+            if cc2.button("❌ Cancel remaining", key="b_cancel"):
+                st.session_state["bulk_links"] = None
+                st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_skip_offset"] = 0
+                st.info("Cancelled remaining. Already-confirmed sends kept.")
+                st.rerun()
+            if cc3.button("🔄 Next batch", key="b_next_batch"):
+                st.session_state["bulk_skip_offset"] = st.session_state.get("bulk_skip_offset", 0) + limit
+                st.session_state["bulk_links"] = None
+                st.session_state["bulk_sent"] = set()
                 st.rerun()
 
 
@@ -1626,7 +1683,7 @@ with tab_templates:
 
     with tmpl_list:
         st.markdown("**Your templates**")
-        pick = st.selectbox("", ["+ Create new template"] + names, key="t_pick", label_visibility="collapsed")
+        pick = st.selectbox("Template", ["+ Create new template"] + names, key="t_pick", label_visibility="collapsed")
         st.divider()
         st.markdown("**Personalize** — insert tokens:")
         token_md = ""
