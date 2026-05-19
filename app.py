@@ -746,7 +746,11 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     templates = load_templates()
     esc = html_mod.escape
 
-    st.button("← Back to CRM", on_click=close_profile)
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:16px 20px;
+        background:#fff;border:1px solid #e2e4e9;border-radius:12px;">
+        <div style="font-size:13px;color:#94a3b8;">Contacts &nbsp;›&nbsp; <span style="color:#1a1a2e;font-weight:600;">{html_mod.escape(lead['business_name'])}</span></div>
+    </div>""", unsafe_allow_html=True)
+    st.button("← Back", on_click=close_profile)
 
     sidebar, main = st.columns([1, 2])
 
@@ -1079,8 +1083,13 @@ with tab_pipeline:
 
 # ─── Contacts (HubSpot-style table) ─────────────────────────────────────────
 with tab_contacts:
-    cf1, cf2, cf3, cf4 = st.columns([2, 1, 1, 1])
-    c_search = cf1.text_input("Search name, phone, email", key="c_search")
+    esc_c = html_mod.escape
+    st.markdown("""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div style="font-size:22px;font-weight:700;color:#1a1a2e;">Contacts</div>
+    </div>""", unsafe_allow_html=True)
+
+    cf1, cf2, cf3, cf4 = st.columns([3, 1, 1, 1])
+    c_search = cf1.text_input("Search name, phone, email", key="c_search", placeholder="Search contacts...")
     c_stage = cf2.selectbox("Lead status", ["All"] + STAGES, key="c_stage")
     c_region = cf3.text_input("Region", key="c_region")
     c_category = cf4.text_input("Category", key="c_category")
@@ -1099,23 +1108,42 @@ with tab_contacts:
     if c_category:
         cview = cview[cview["category"].str.contains(c_category, case=False, na=False)]
 
-    st.caption(f"{len(cview)} contacts")
+    st.markdown(f'<div style="font-size:13px;color:#64748b;margin-bottom:12px;font-weight:500;">{len(cview):,} contacts</div>', unsafe_allow_html=True)
 
-    page_size = 50
+    page_size = 25
     total_pages = max(1, (len(cview) + page_size - 1) // page_size)
-    page = st.number_input("Page", 1, total_pages, 1, key="c_page")
+    pc1, pc2, pc3 = st.columns([1, 4, 1])
+    page = pc2.number_input("Page", 1, total_pages, 1, key="c_page", label_visibility="collapsed")
     page_df = cview.iloc[(page-1)*page_size : page*page_size]
 
-    for _, r in page_df.iterrows():
-        pill_cls = PILL_MAP.get(r["stage"], "stage-pill-new")
-        cc1, cc2, cc3, cc4, cc5 = st.columns([2, 2, 1, 1, 0.5])
-        cc1.markdown(f"**{r['contact_name'] or '--'}**  \n{r['business_name']}")
-        cc2.markdown(f"{r['email'] or '--'}  \n{r['phone'] or '--'}")
-        cc3.markdown(f"<span class='contact-stage {pill_cls}'>{r['stage']}</span>", unsafe_allow_html=True)
-        cc4.caption(f"{r['region'] or '--'} · {r['category'] or '--'}")
-        cc5.button("View", key=f"ct_{r['id']}", on_click=open_profile, args=(r["id"],))
+    header_html = """<div style="display:grid;grid-template-columns:40px 2fr 2fr 1.5fr 1fr 1fr 60px;gap:8px;padding:10px 16px;
+        background:#f8f9fb;border-radius:10px 10px 0 0;border:1px solid #e2e4e9;border-bottom:2px solid #e2e4e9;
+        font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.8px;">
+        <div></div><div>Name</div><div>Email</div><div>Phone</div><div>Stage</div><div>Region</div><div></div>
+    </div>"""
+    st.markdown(header_html, unsafe_allow_html=True)
 
-    st.caption(f"Page {page} of {total_pages}")
+    for idx, (_, r) in enumerate(page_df.iterrows()):
+        pill_cls = PILL_MAP.get(r["stage"], "stage-pill-new")
+        initials = "".join(w[0] for w in (r["contact_name"] or "?").split()[:2]).upper() or "?"
+        bg = "#fff" if idx % 2 == 0 else "#f8f9fb"
+        row_html = f"""<div style="display:grid;grid-template-columns:40px 2fr 2fr 1.5fr 1fr 1fr 60px;gap:8px;padding:10px 16px;
+            background:{bg};border:1px solid #e2e4e9;border-top:none;align-items:center;font-size:13px;">
+            <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#a78bfa);
+                color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;">{esc_c(initials)}</div>
+            <div><div style="font-weight:600;color:#1a1a2e;">{esc_c(r['contact_name'] or '--')}</div>
+                <div style="font-size:11px;color:#94a3b8;">{esc_c(r['business_name'])}</div></div>
+            <div style="color:#64748b;">{esc_c(r['email'] or '--')}</div>
+            <div style="color:#64748b;">{esc_c(r['phone'] or '--')}</div>
+            <div><span class="contact-stage {pill_cls}">{esc_c(r['stage'])}</span></div>
+            <div style="font-size:12px;color:#94a3b8;">{esc_c(r['region'] or '--')}</div>
+        </div>"""
+        rc1, rc2 = st.columns([20, 1])
+        rc1.markdown(row_html, unsafe_allow_html=True)
+        rc2.button("→", key=f"ct_{r['id']}", on_click=open_profile, args=(r["id"],))
+
+    pc_b1, pc_b2, pc_b3 = st.columns([2, 3, 2])
+    pc_b2.markdown(f'<div style="text-align:center;font-size:13px;color:#94a3b8;padding:12px;">Page {page} of {total_pages} &nbsp;·&nbsp; {page_size} per page</div>', unsafe_allow_html=True)
 
 # ─── Lead detail (quick pick → profile view) ─────────────────────────────
 with tab_lead:
@@ -1372,7 +1400,8 @@ with tab_bulk:
     if df.empty:
         st.info("No leads. Import first.")
     else:
-        st.subheader("Send template to multiple leads")
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Outreach Centre</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Generate Gmail compose links for bulk sending</div>""", unsafe_allow_html=True)
         bc1, bc2 = st.columns(2)
         tmpl_pick = bc1.selectbox("Template", list(templates.keys()), key="b_tmpl")
         stage_pick = bc2.multiselect("Filter by stage", STAGES, default=["New"], key="b_stage")
@@ -1414,13 +1443,23 @@ with tab_bulk:
 
         tracker = load_send_counts()
         remaining_today = sum(s["daily_cap"] - tracker["counts"].get(s["email"], 0) for s in SENDERS)
-        st.markdown(f"**Sender rotation active** — {len(SENDERS)} inboxes, **{remaining_today}** sends left today")
+        sender_html = f'<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin:16px 0;">'
+        sender_html += f'<div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:12px;">Sender Rotation &nbsp;<span style="color:#94a3b8;font-weight:400;">— {remaining_today} sends remaining today</span></div>'
         for s in SENDERS:
             used = tracker["counts"].get(s["email"], 0)
             left = s["daily_cap"] - used
-            bar_pct = used / s["daily_cap"] if s["daily_cap"] > 0 else 0
-            color = "🟢" if left > 20 else "🟡" if left > 5 else "🔴"
-            st.caption(f"{color} {s['email']}: {used}/{s['daily_cap']} sent ({left} left)")
+            bar_pct = min(used / s["daily_cap"], 1.0) if s["daily_cap"] > 0 else 0
+            bar_color = "#10b981" if left > 20 else "#f59e0b" if left > 5 else "#ef4444"
+            sender_html += f'''<div style="margin-bottom:10px;">
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                    <span style="font-weight:500;color:#1a1a2e;">{html_mod.escape(s["email"])}</span>
+                    <span style="color:#94a3b8;">{used}/{s["daily_cap"]}</span>
+                </div>
+                <div style="background:#e2e4e9;border-radius:10px;height:6px;overflow:hidden;">
+                    <div style="background:{bar_color};height:6px;width:{bar_pct*100:.0f}%;border-radius:10px;transition:width 0.3s;"></div>
+                </div></div>'''
+        sender_html += '</div>'
+        st.markdown(sender_html, unsafe_allow_html=True)
 
         if limit > remaining_today:
             st.error(f"Only {remaining_today} sends left across all inboxes today. Lower the limit or wait til tomorrow.")
@@ -1454,26 +1493,34 @@ with tab_bulk:
                 st.session_state["bulk_sent"] = set()
             sent_set = st.session_state["bulk_sent"]
             unsent = [i for i, l in enumerate(links) if i not in sent_set]
-            st.info(f"{len(links)} links generated. **{len(sent_set)}** confirmed sent, **{len(unsent)}** remaining.")
+            prog_pct = len(sent_set) / len(links) * 100 if links else 0
+            st.markdown(f"""<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:14px;font-weight:600;color:#1a1a2e;">{len(links)} links generated</span>
+                    <span style="font-size:13px;color:#94a3b8;"><span style="color:#10b981;font-weight:600;">{len(sent_set)}</span> sent &nbsp;·&nbsp; <span style="color:#f59e0b;font-weight:600;">{len(unsent)}</span> remaining</span>
+                </div>
+                <div style="background:#e2e4e9;border-radius:10px;height:6px;overflow:hidden;">
+                    <div style="background:linear-gradient(90deg,#10b981,#34d399);height:6px;width:{prog_pct:.0f}%;border-radius:10px;"></div>
+                </div></div>""", unsafe_allow_html=True)
 
             import streamlit.components.v1 as components
             current_sender = None
             for i, lnk in enumerate(links):
                 if lnk["sender"] != current_sender:
                     current_sender = lnk["sender"]
-                    st.markdown(f"**From: {current_sender}**")
+                    st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                 if i in sent_set:
-                    st.markdown(f"~~{lnk['business']}~~ — ✅ sent")
+                    st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
                 else:
                     lc1, lc2, lc3 = st.columns([3, 3, 1])
                     with lc1:
                         components.html(
                             f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
-                            f'style="color:#0d6efd;text-decoration:none;font-family:sans-serif;font-size:14px;">✉ {html_mod.escape(lnk["business"])}</a>',
-                            height=30,
+                            f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:13px;font-weight:500;">✉ {html_mod.escape(lnk["business"])}</a>',
+                            height=28,
                         )
-                    lc2.caption(lnk["email"])
-                    if lc3.button("Sent", key=f"bsent_{i}"):
+                    lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                    if lc3.button("Sent ✓", key=f"bsent_{i}"):
                         tracker = load_send_counts()
                         log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
                         lead_row = df[df["id"] == str(lnk["lead_id"])]
@@ -1492,8 +1539,11 @@ with tab_bulk:
                 js_links = json.dumps(unsent_links)
                 import streamlit.components.v1 as comp2
                 comp2.html(
-                    f'''<button onclick="openAll()" style="background:#0d6efd;color:white;border:none;padding:10px 24px;
-                    border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;">🚀 Open all {len(unsent_links)} in new tabs</button>
+                    f'''<button onclick="openAll()" style="background:linear-gradient(135deg,#7c3aed,#a78bfa);color:white;border:none;padding:12px 28px;
+                    border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;font-family:Inter,sans-serif;box-shadow:0 2px 8px rgba(124,58,237,0.3);transition:all 0.15s;"
+                    onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 12px rgba(124,58,237,0.4)'"
+                    onmouseout="this.style.transform='none';this.style.boxShadow='0 2px 8px rgba(124,58,237,0.3)'"
+                    >Open all {len(unsent_links)} in new tabs</button>
                     <script>
                     function openAll() {{
                         var links = {js_links};
