@@ -479,9 +479,9 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
     border-radius: 16px; padding: 28px 32px; margin-bottom: 24px;
     display: flex; align-items: center; justify-content: space-between;
 }
-.crm-header .logo { font-size: 26px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
-.crm-header .logo span { color: #a78bfa; }
-.crm-header .subtitle { font-size: 13px; color: #a5a5c0; margin-top: 2px; }
+.crm-header .logo { font-size: 36px; font-weight: 700; color: #fff !important; letter-spacing: -0.5px; }
+.crm-header .logo span { color: #a78bfa !important; }
+.crm-header .subtitle { font-size: 14px; color: #a5a5c0 !important; margin-top: 2px; }
 
 /* ── KPI bar ── */
 .kpi-bar { display: flex; gap: 16px; margin-bottom: 20px; }
@@ -525,12 +525,12 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 }
 
 /* ── Stage colors ── */
-.stage-new { border-color: #10b981; }
-.stage-contacted { border-color: #3b82f6; }
-.stage-demo { border-color: #7c3aed; }
-.stage-proposal { border-color: #f59e0b; }
-.stage-won { border-color: #10b981; }
-.stage-lost { border-color: #ef4444; }
+.stage-new { border-color: #10b981; background: #f0fdf9; }
+.stage-contacted { border-color: #3b82f6; background: #eff6ff; }
+.stage-demo { border-color: #7c3aed; background: #f5f3ff; }
+.stage-proposal { border-color: #f59e0b; background: #fffbeb; }
+.stage-won { border-color: #10b981; background: #ecfdf5; }
+.stage-lost { border-color: #ef4444; background: #fef2f2; }
 
 /* ── Contact table ── */
 .contact-table { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -914,6 +914,13 @@ STAGE_CLASSES = {
     "Proposal": "stage-proposal", "Won": "stage-won", "Lost": "stage-lost",
     "New Referral": "stage-new", "Referral Signed Up": "stage-won", "Reward Sent": "stage-demo",
 }
+STAGE_TINTS = {
+    "New": ("#10b981", "#f0fdf9"), "Contacted": ("#3b82f6", "#eff6ff"),
+    "Demo Booked": ("#7c3aed", "#f5f3ff"), "Proposal": ("#f59e0b", "#fffbeb"),
+    "Won": ("#10b981", "#ecfdf5"), "Lost": ("#ef4444", "#fef2f2"),
+    "New Referral": ("#10b981", "#f0fdf9"), "Referral Signed Up": ("#10b981", "#ecfdf5"),
+    "Reward Sent": ("#7c3aed", "#f5f3ff"),
+}
 
 with tab_pipeline:
     ph1, ph2 = st.columns([2, 1])
@@ -1014,7 +1021,9 @@ with tab_pipeline:
                 na = esc(row["next_action"] or "")
                 na_line = f'<div class="meta">Next: {na}</div>' if na else ""
                 cat_line = f'<span class="category-tag">{cat}</span>' if cat else ""
+                s_border, s_bg = STAGE_TINTS.get(stage, ("#e2e4e9", "#fff"))
                 with st.container(border=True):
+                    st.markdown(f'<style>[data-testid="stContainer"]:has(#card-{row["id"]}){{background:{s_bg} !important;border-left:3px solid {s_border} !important;}}</style><span id="card-{row["id"]}" style="display:none"></span>', unsafe_allow_html=True)
                     st.markdown(
                         f'<div class="deal-card-inner">'
                         f'<div class="biz">{esc(row["business_name"])}</div>'
