@@ -590,22 +590,8 @@ input, textarea, select, [data-testid="stTextInput"] input,
 input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 3px rgba(124,58,237,0.1) !important; }
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] { background: #fff !important; border-radius: 12px !important; }
 
-/* ── Tabs ── */
-.stTabs [data-baseweb="tab-list"] {
-    background: #fff !important; border-radius: 12px !important;
-    padding: 4px !important; gap: 2px !important;
-    border: 1px solid #e2e4e9 !important; margin-bottom: 20px !important;
-}
-.stTabs [data-baseweb="tab"] {
-    color: #64748b !important; font-weight: 500 !important; font-size: 13px !important;
-    border-radius: 8px !important; padding: 8px 16px !important;
-    font-family: 'Inter', sans-serif !important;
-}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {
-    background: #7c3aed !important; color: #fff !important;
-}
-.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
-.stTabs [data-baseweb="tab-border"] { display: none !important; }
+/* ── Tabs (hidden — using sidebar nav) ── */
+.stTabs { display: none !important; }
 
 /* ── Buttons ── */
 .stButton > button {
@@ -815,15 +801,210 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 hr { border-color: #e2e4e9 !important; }
 [data-testid="stForm"] { background: #fff !important; border: 1px solid #e2e4e9 !important; border-radius: 12px !important; padding: 24px !important; }
 .stMultiSelect > div { border-radius: 8px !important; }
+
+/* ── HIDE STREAMLIT CHROME ── */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+[data-testid="stToolbar"] { display: none !important; }
+header[data-testid="stHeader"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+div[data-testid="stStatusWidget"] { display: none !important; }
+
+/* ── SMOOTH TRANSITIONS EVERYWHERE ── */
+* { transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.1s ease, opacity 0.15s ease; }
+
+/* ── REDUCE TOP PADDING (no more wasted space) ── */
+.stApp > header { display: none !important; }
+[data-testid="stAppViewContainer"] > div:first-child { padding-top: 0 !important; }
+.block-container { padding-top: 1rem !important; padding-bottom: 0 !important; max-width: 100% !important; }
+
+/* ── SIDEBAR NAVIGATION ── */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f0f23 0%, #1a1a2e 100%) !important;
+    width: 240px !important;
+    min-width: 240px !important;
+    border-right: 1px solid #2d2d4a !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding-top: 16px !important; }
+section[data-testid="stSidebar"] .stRadio > label { display: none !important; }
+section[data-testid="stSidebar"] .stRadio > div {
+    flex-direction: column !important; gap: 2px !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label {
+    padding: 10px 16px !important; border-radius: 8px !important;
+    font-size: 13px !important; font-weight: 500 !important;
+    cursor: pointer !important; margin: 0 8px !important;
+    color: #a5a5c0 !important; transition: all 0.15s ease !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label:hover {
+    background: rgba(124, 58, 237, 0.1) !important; color: #fff !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"],
+section[data-testid="stSidebar"] .stRadio > div > label:has(input:checked) {
+    background: rgba(124, 58, 237, 0.2) !important; color: #fff !important;
+    border-left: 3px solid #7c3aed !important;
+}
+
+/* ── DENSE LAYOUT ── */
+.stTabs [data-baseweb="tab-list"] { display: none !important; }
+.element-container { margin-bottom: 0.25rem !important; }
+[data-testid="stVerticalBlock"] > div { gap: 0.5rem !important; }
+
+/* ── STICKY HEADER ── */
+.crm-header {
+    position: sticky; top: 0; z-index: 999;
+    background: linear-gradient(135deg, #0f0f23 0%, #2d1b69 100%);
+    border-radius: 0; padding: 16px 24px; margin: -1rem -1rem 16px -1rem;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid #2d2d4a;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+}
+.crm-header .logo { font-size: 24px; font-weight: 700; color: #fff !important; letter-spacing: -0.5px; }
+.crm-header .logo span { color: #a78bfa !important; }
+.crm-header .subtitle { font-size: 12px; color: #a5a5c0 !important; margin-top: 0; }
+
+/* ── KPI CARDS - more compact ── */
+.kpi-bar { display: flex; gap: 12px; margin-bottom: 16px; }
+.kpi-card {
+    flex: 1; background: #fff; border: 1px solid #e2e4e9; border-radius: 10px;
+    padding: 14px 16px; text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
+.kpi-card .num { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.kpi-card .label { font-size: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 2px; font-weight: 600; }
+
+/* ── KANBAN - tighter cards ── */
+.kanban-header {
+    padding: 10px 12px; font-weight: 600; font-size: 11px;
+    border-bottom: 3px solid; text-transform: uppercase; letter-spacing: 0.8px;
+    background: #fff; border-radius: 10px 10px 0 0;
+    position: sticky; top: 70px; z-index: 10;
+}
+.deal-card-inner { padding: 2px 0; }
+.deal-card-inner .biz { font-weight: 600; font-size: 12px; color: #1a1a2e; margin-bottom: 2px; }
+.deal-card-inner .contact { font-size: 11px; color: #64748b; }
+.deal-card-inner .meta { font-size: 10px; color: #94a3b8; margin-top: 4px; }
+
+/* ── CONTAINERS - tighter padding ── */
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"] {
+    border: 1px solid #e8e8ee !important; border-radius: 8px !important;
+    padding: 8px 10px 4px !important; margin-bottom: 6px !important;
+    background: #fff !important;
+}
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"]:hover {
+    box-shadow: 0 2px 8px rgba(124,58,237,0.08); border-color: #c4b5fd !important;
+}
+
+/* ── BUTTONS - more compact ── */
+.stButton > button {
+    border-radius: 6px !important; font-weight: 500 !important;
+    font-size: 12px !important; padding: 6px 14px !important;
+    border: 1px solid #e2e4e9 !important; background: #fff !important;
+    color: #1a1a2e !important; font-family: 'Inter', sans-serif !important;
+    cursor: pointer !important;
+}
+.stButton > button:hover { border-color: #7c3aed !important; color: #7c3aed !important; background: #faf5ff !important; }
+.stButton > button:active { transform: scale(0.97); }
+.stButton > button[kind="primary"], button[data-testid="stFormSubmitButton"] {
+    background: #7c3aed !important; color: #fff !important; border-color: #7c3aed !important;
+}
+.stButton > button[kind="primary"]:hover { background: #6d28d9 !important; }
+[data-testid="stContainer"] .stButton > button {
+    padding: 3px 10px !important; font-size: 10px !important;
+    height: auto !important; min-height: 0 !important;
+}
+
+/* ── INPUTS - compact ── */
+input, textarea, select, [data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background-color: #fff !important; color: #1a1a2e !important;
+    border: 1px solid #e2e4e9 !important; border-radius: 6px !important;
+    font-family: 'Inter', sans-serif !important; font-size: 13px !important;
+}
+input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 2px rgba(124,58,237,0.08) !important; }
+
+/* ── CONTACT TABLE - hover row highlight ── */
+.contact-table tr { transition: background 0.1s; }
+.contact-table tr:hover td { background: #faf5ff; cursor: pointer; }
+.contact-table td { padding: 10px 14px; font-size: 12px; }
+.contact-table th { padding: 10px 14px; font-size: 10px; }
+
+/* ── PROFILE CARD - refined ── */
+.profile-card { background: #fff; border: 1px solid #e2e4e9; border-radius: 12px; padding: 24px 20px; text-align: center; }
+.profile-avatar {
+    width: 64px; height: 64px; border-radius: 14px;
+    background: linear-gradient(135deg, #7c3aed, #a78bfa);
+    color: #fff; font-size: 22px; font-weight: 700; line-height: 64px;
+    margin: 0 auto 12px;
+}
+.profile-name { font-size: 17px; font-weight: 700; color: #1a1a2e; margin-bottom: 2px; }
+
+/* ── TIMELINE - tighter ── */
+.timeline { padding-left: 24px; }
+.timeline-item { margin-bottom: 14px; }
+.timeline-dot { left: -20px; top: 3px; width: 12px; height: 12px; }
+.timeline-body { font-size: 11px; padding: 10px 14px; max-height: 150px; }
+
+/* ── TOAST-STYLE NOTIFICATIONS ── */
+[data-testid="stAlert"] {
+    border-radius: 8px !important; font-size: 13px !important;
+    padding: 10px 16px !important; border-left: 4px solid !important;
+    animation: slideIn 0.2s ease-out;
+}
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── SKELETON LOADING FEEL ── */
+[data-testid="stSpinner"] > div {
+    background: #f8f9fb; border-radius: 8px; padding: 20px;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+
+/* ── DATA EDITOR / TABLES ── */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    background: #fff !important; border-radius: 8px !important;
+    border: 1px solid #e2e4e9 !important;
+}
+
+/* ── EXPANDER ── */
+[data-testid="stExpander"] {
+    background: #fff !important; border: 1px solid #e2e4e9 !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] summary { font-size: 13px !important; font-weight: 500 !important; }
+
+/* ── SELECTBOX ── */
+.stSelectbox > div > div { background: #fff !important; border-radius: 6px !important; font-size: 13px !important; }
+[data-testid="stContainer"] .stSelectbox { margin-top: -4px; }
+[data-testid="stContainer"] .stSelectbox > div > div {
+    min-height: 0 !important; padding: 2px 8px !important; font-size: 10px !important;
+}
+
+/* ── MULTISELECT ── */
+.stMultiSelect > div { border-radius: 6px !important; }
 </style>
 """
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳")
+st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳", initial_sidebar_state="expanded")
 st.markdown(HUBSPOT_CSS, unsafe_allow_html=True)
-st.markdown("""<div class="crm-header">
-    <div><div class="logo">JOE'S <span>CRM</span></div>
-    <div class="subtitle">Yetipay Sales Pipeline &amp; Outreach Manager</div></div>
+# Header is in sidebar now — just a thin top bar for context
+st.markdown(f"""<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 12px;border-bottom:1px solid #e2e4e9;margin-bottom:16px;">
+    <div style="font-size:16px;font-weight:700;color:#1a1a2e;">{nav_choice}</div>
+    <div style="font-size:12px;color:#94a3b8;">{date.today().strftime('%A, %d %B %Y')}</div>
 </div>""", unsafe_allow_html=True)
 cfg = load_config()
 df = load_crm()
@@ -843,6 +1024,35 @@ if "duplicates" not in st.session_state or st.session_state.get("_dupes_stale", 
 
 LEAD_SCORES = st.session_state["lead_scores"]
 DUPLICATES = st.session_state["duplicates"]
+
+# ─── Sidebar Navigation ──────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(f"""<div style="padding:8px 16px 20px;border-bottom:1px solid #2d2d4a;margin-bottom:12px;">
+        <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-0.5px;">JOE'S <span style="color:#a78bfa;">CRM</span></div>
+        <div style="font-size:11px;color:#64648a;margin-top:2px;">{date.today().strftime('%A, %d %b %Y')}</div>
+    </div>""", unsafe_allow_html=True)
+
+NAV_ITEMS = ["📊 Pipeline", "👥 Contacts", "📅 Today", "✉️ Outreach", "🔄 Follow Up",
+             "✅ Tasks", "📈 Reports", "➕ Add Lead", "📥 Import", "📝 Templates", "⚙️ Settings"]
+with st.sidebar:
+    nav_choice = st.radio("Navigation", NAV_ITEMS, key="nav", label_visibility="collapsed")
+
+# Quick stats in sidebar
+with st.sidebar:
+    st.markdown(f"""<div style="border-top:1px solid #2d2d4a;padding:12px 16px;margin-top:8px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:11px;color:#64648a;">Pipeline</span>
+            <span style="font-size:11px;color:#a78bfa;font-weight:600;">{len(df[~df['stage'].isin(['Won','Lost'])])} active</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:11px;color:#64648a;">Won</span>
+            <span style="font-size:11px;color:#10b981;font-weight:600;">{len(df[df['stage']=='Won'])}/{cfg['target']}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:11px;color:#64648a;">Today's emails</span>
+            <span style="font-size:11px;color:#fff;font-weight:600;">{sum(load_send_counts()['counts'].values())}</span>
+        </div>
+    </div>""", unsafe_allow_html=True)
 
 # Stale lead alerts (sidebar)
 _stale_leads = []
@@ -880,7 +1090,7 @@ def close_profile():
     st.session_state["view_lead_id"] = None
 
 
-# ─── Global search bar ─────────────────────────────────────────────────────
+# ─── Global search bar (shown on pipeline + contacts) ──────────────────────
 gs1, gs2 = st.columns([3, 1])
 global_search = gs1.text_input("🔍 Search leads by name, email, phone, or business", key="global_search", label_visibility="collapsed", placeholder="Search leads by name, email, phone, or business...")
 if global_search and not df.empty:
@@ -1189,10 +1399,15 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
 
     st.stop()
 
-# ─── Tabs (normal view) ───────────────────────────────────────────────────
-tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_followup, tab_tasks, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
-    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Follow Up", "Tasks", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
-)
+# ─── Page routing via sidebar nav ─────────────────────────────────────────
+# Map nav labels to page keys
+_NAV_MAP = {
+    "📊 Pipeline": "pipeline", "👥 Contacts": "contacts", "📅 Today": "today",
+    "✉️ Outreach": "outreach", "🔄 Follow Up": "followup", "✅ Tasks": "tasks",
+    "📈 Reports": "reports", "➕ Add Lead": "add", "📥 Import": "import",
+    "📝 Templates": "templates", "⚙️ Settings": "settings",
+}
+_active_page = _NAV_MAP.get(nav_choice, "pipeline")
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
 STAGE_CLASSES = {
@@ -1208,7 +1423,7 @@ STAGE_TINTS = {
     "Reward Sent": ("#7c3aed", "#f5f3ff"),
 }
 
-with tab_pipeline:
+if _active_page == "pipeline":
     ph1, ph2 = st.columns([2, 1])
     active_pipeline = ph1.selectbox("Deal pipeline", list(PIPELINES.keys()), key="pipeline_sel")
     active_stages = PIPELINES[active_pipeline]
@@ -1378,7 +1593,7 @@ with tab_pipeline:
         st.rerun()
 
 # ─── Contacts (HubSpot-style table) ─────────────────────────────────────────
-with tab_contacts:
+if _active_page == "contacts":
     esc_c = html_mod.escape
     st.markdown("""<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <div style="font-size:22px;font-weight:700;color:#1a1a2e;">Contacts</div>
@@ -1442,7 +1657,7 @@ with tab_contacts:
     pc_b2.markdown(f'<div style="text-align:center;font-size:13px;color:#94a3b8;padding:12px;">Page {page} of {total_pages} &nbsp;·&nbsp; {page_size} per page</div>', unsafe_allow_html=True)
 
 # ─── Lead detail (quick pick → profile view) ─────────────────────────────
-with tab_lead:
+if _active_page == "lead_detail":
     if df.empty:
         st.info("No leads yet. Import some.")
     else:
@@ -1671,7 +1886,7 @@ with tab_lead:
 
 
 # ─── Today ───────────────────────────────────────────────────────────────────
-with tab_today:
+if _active_page == "today":
     today = date.today().isoformat()
     due = df[(df["next_action_date"] <= today) & (df["next_action_date"] != "")
              & (~df["stage"].isin(["Won", "Lost"]))]
@@ -1691,7 +1906,7 @@ with tab_today:
                  use_container_width=True, hide_index=True)
 
 # ─── Bulk email ──────────────────────────────────────────────────────────────
-with tab_bulk:
+if _active_page == "outreach":
     templates = load_templates()
     if df.empty:
         st.info("No leads. Import first.")
@@ -2001,7 +2216,7 @@ with tab_bulk:
 
 
 # ─── Follow Up ───────────────────────────────────────────────────────────────
-with tab_followup:
+if _active_page == "followup":
     contacted = df[df["stage"] == "Contacted"].copy()
     if contacted.empty:
         st.info("No contacted leads to follow up with yet.")
@@ -2118,7 +2333,7 @@ with tab_followup:
 
 
 # ─── Tasks ───────────────────────────────────────────────────────────────────
-with tab_tasks:
+if _active_page == "tasks":
     st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Task Manager</div>
     <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Track follow-ups, calls, and to-dos across all leads</div>""", unsafe_allow_html=True)
 
@@ -2215,7 +2430,7 @@ with tab_tasks:
 
 
 # ─── Sequences ───────────────────────────────────────────────────────────────
-with tab_sequences:
+if _active_page == "sequences":
     sequences = load_sequences()
     templates = load_templates()
     seq_q = load_seq_queue()
@@ -2330,7 +2545,7 @@ with tab_sequences:
 
 
 # ─── Reports ─────────────────────────────────────────────────────────────────
-with tab_charts:
+if _active_page == "reports":
     if df.empty:
         st.info("No data yet.")
     else:
@@ -2449,7 +2664,7 @@ with tab_charts:
 
 
 # ─── Add lead ────────────────────────────────────────────────────────────────
-with tab_add:
+if _active_page == "add":
     with st.form("add_lead", clear_on_submit=True):
         c1, c2 = st.columns(2)
         biz = c1.text_input("Business name *")
@@ -2480,7 +2695,7 @@ with tab_add:
                 st.success(f"Added {biz}")
 
 # ─── Import ──────────────────────────────────────────────────────────────────
-with tab_import:
+if _active_page == "import":
     st.write(f"Source: `{LEADS_SRC}`")
     if LEADS_SRC.exists():
         src = pd.read_csv(LEADS_SRC, dtype=str).fillna("")
@@ -2516,7 +2731,7 @@ with tab_import:
             st.rerun()
 
 # ─── Templates (HubSpot-style) ──────────────────────────────────────────────
-with tab_templates:
+if _active_page == "templates":
     templates = load_templates()
     names = list(templates.keys())
 
@@ -2598,7 +2813,7 @@ with tab_templates:
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
-with tab_settings:
+if _active_page == "settings":
     new_target = st.number_input("Monthly target (terminals)", min_value=1, value=cfg["target"])
     if st.button("Save target"):
         cfg["target"] = int(new_target)
