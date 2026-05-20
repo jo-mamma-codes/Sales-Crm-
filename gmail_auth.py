@@ -23,6 +23,14 @@ ROOT = Path(__file__).resolve().parent
 CREDS_FILE = ROOT / "gmail_credentials.json"
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+# Must match SENDERS config in app.py
+SENDER_PROFILES = {
+    "joseph.allison@yetipay.me": "Profile 5",
+    "insidesales@yetipay.me": "Profile 4",
+    "dominic.ritchie@yetipay.me": "Profile 1",
+    "ashley@yetipay.me": "Profile 5",
+}
+
 
 def _token_file(email=None):
     if email:
@@ -32,13 +40,10 @@ def _token_file(email=None):
 
 
 def get_gmail_service(sender_email=None):
-    """Get Gmail API service. If sender_email given, use that account's token.
-    Falls back to default token if per-sender token missing.
+    """Get Gmail API service. Uses single master token (joseph.allison).
+    sender_email param kept for future multi-token support but currently ignored.
     """
-    token_path = _token_file(sender_email)
-    # Fallback to legacy single token
-    if not token_path.exists() and sender_email:
-        token_path = _token_file(None)
+    token_path = _token_file(None)  # Always use master token
 
     creds = None
     if token_path.exists():
@@ -53,7 +58,23 @@ def get_gmail_service(sender_email=None):
                 print("Download OAuth client JSON from Google Cloud Console and save as gmail_credentials.json")
                 return None
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_FILE), SCOPES)
-            creds = flow.run_local_server(port=8090)
+            # login_hint pre-fills email, prompt=select_account forces picker
+            extra = {"login_hint": sender_email, "prompt": "select_account"} if sender_email else {}
+            # Open in sender's Chrome profile so correct Google session is used
+            chrome_profile = SENDER_PROFILES.get(sender_email)
+            if chrome_profile:
+                import subprocess, webbrowser
+                auth_url, _ = flow.authorization_url(**extra)
+                print(f"\n🔗 Opening in {chrome_profile} Chrome profile...")
+                print(f"   If browser doesn't open, paste this URL:\n   {auth_url}\n")
+                subprocess.Popen([
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    f"--profile-directory={chrome_profile}",
+                    auth_url,
+                ])
+                creds = flow.run_local_server(port=8090, open_browser=False, **extra)
+            else:
+                creds = flow.run_local_server(port=8090, **extra)
             # Save to per-sender token
             save_path = _token_file(sender_email) if sender_email else _token_file(None)
             save_path.write_text(creds.to_json())

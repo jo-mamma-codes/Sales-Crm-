@@ -1648,42 +1648,29 @@ with tab_bulk:
                         st.rerun()
 
             cc1, cc2, cc3, cc4 = st.columns(4)
-            if cc4.button("🔍 Check Gmail sent (all senders)", key="b_check_sent"):
+            if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
                 try:
-                    from gmail_auth import check_sent_emails, get_authenticated_senders
-                    authed = set(get_authenticated_senders())
-                    # Group unsent by sender
-                    sender_unsent = {}
-                    for i in unsent:
-                        sender_unsent.setdefault(links[i]["sender"], []).append(i)
+                    from gmail_auth import check_sent_emails
+                    all_unsent_emails = [links[i]["email"] for i in unsent]
+                    found = check_sent_emails(all_unsent_emails, hours_back=24) if all_unsent_emails else set()
                     tracker = load_send_counts()
                     newly_confirmed = 0
-                    no_token = set()
-                    for sender_email, idxs in sender_unsent.items():
-                        if sender_email.lower() not in {a.lower() for a in authed}:
-                            no_token.add(sender_email)
-                            continue
-                        emails_to_check = [links[i]["email"] for i in idxs]
-                        found = check_sent_emails(emails_to_check, hours_back=24, sender_email=sender_email)
-                        for i in idxs:
-                            if links[i]["email"].lower() in found:
-                                log_activity(links[i]["lead_id"], links[i]["business"], "email", links[i]["subject"], links[i]["body"])
-                                lead_row = df[df["id"] == str(links[i]["lead_id"])]
-                                updates = {"last_touch": date.today().isoformat()}
-                                if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
-                                    updates["stage"] = "Contacted"
-                                save_lead(links[i]["lead_id"], updates)
-                                tracker["counts"][sender_email] = tracker["counts"].get(sender_email, 0) + 1
-                                st.session_state["bulk_sent"].add(i)
-                                newly_confirmed += 1
+                    for i in unsent:
+                        if links[i]["email"].lower() in found:
+                            log_activity(links[i]["lead_id"], links[i]["business"], "email", links[i]["subject"], links[i]["body"])
+                            lead_row = df[df["id"] == str(links[i]["lead_id"])]
+                            updates = {"last_touch": date.today().isoformat()}
+                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                updates["stage"] = "Contacted"
+                            save_lead(links[i]["lead_id"], updates)
+                            tracker["counts"][links[i]["sender"]] = tracker["counts"].get(links[i]["sender"], 0) + 1
+                            st.session_state["bulk_sent"].add(i)
+                            newly_confirmed += 1
                     save_send_counts(tracker)
-                    msg = f"Found {newly_confirmed} sent emails."
-                    if no_token:
-                        msg += f" No token for: {', '.join(no_token)} — run `python3 gmail_auth.py <email>`"
-                    st.success(msg)
+                    st.success(f"Found {newly_confirmed} sent emails in Gmail.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Gmail check failed: {e}. Run `python3 gmail_auth.py <email>` first.")
+                    st.error(f"Gmail check failed: {e}. Run `python3 gmail_auth.py` first.")
             if cc1.button("✅ Confirm all sent", type="primary", key="b_confirm"):
                 tracker = load_send_counts()
                 for i, lnk in enumerate(links):
@@ -1750,16 +1737,12 @@ with tab_followup:
         fu_c1, fu_c2, fu_c3 = st.columns(3)
         if fu_c1.button("🔍 Scan for bounces & replies", type="primary", key="fu_scan"):
             try:
-                from gmail_auth import check_bounces, check_replies, get_authenticated_senders
-                authed = get_authenticated_senders()
+                from gmail_auth import check_bounces, check_replies
                 emails_to_check = contacted[contacted["fu_status"] == "Awaiting Reply"]["email"].dropna().str.lower().tolist()
                 if emails_to_check:
-                    with st.spinner(f"Scanning {len(emails_to_check)} emails across {len(authed)} sender(s)..."):
-                        bounced = set()
-                        replied = set()
-                        for sender in authed:
-                            bounced |= check_bounces(emails_to_check, hours_back=168, sender_email=sender)
-                            replied |= check_replies(emails_to_check, hours_back=168, sender_email=sender)
+                    with st.spinner(f"Scanning {len(emails_to_check)} emails..."):
+                        bounced = check_bounces(emails_to_check, hours_back=168)
+                        replied = check_replies(emails_to_check, hours_back=168)
                     tagged = 0
                     for _, row in contacted.iterrows():
                         e = str(row["email"]).lower()
