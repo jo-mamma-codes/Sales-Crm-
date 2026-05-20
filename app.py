@@ -158,6 +158,123 @@ def update_task(task_id, updates):
         pass
 
 
+# ─── Lead Scoring ────────────────────────────────────────────────────────────
+def score_lead(lead, activity_df):
+    """Score a lead 0-100 based on engagement. Returns (score, label, color)."""
+    score = 0
+    lid = str(lead.get("id", ""))
+
+    # Stage points
+    stage_pts = {"New": 5, "Contacted": 20, "Demo Booked": 50, "Proposal": 70, "Won": 100, "Lost": 0}
+    score += stage_pts.get(lead.get("stage", ""), 0)
+
+    # Activity count
+    if not activity_df.empty:
+        lead_acts = activity_df[activity_df["lead_id"] == lid]
+        n_acts = len(lead_acts)
+        score += min(n_acts * 5, 20)  # max 20 pts from activity
+
+        # Email replies (check notes for [REPLIED])
+        if "[REPLIED]" in str(lead.get("notes", "")):
+            score += 15
+
+    # Deal value bonus
+    dv = float(lead.get("deal_value", 0) or 0)
+    if dv > 0:
+        score += 10
+
+    # Recency penalty
+    lt = lead.get("last_touch", "")
+    if lt:
+        try:
+            days_since = (date.today() - date.fromisoformat(str(lt)[:10])).days
+            if days_since <= 3:
+                score += 10
+            elif days_since <= 7:
+                score += 5
+            elif days_since > 14:
+                score -= 10
+            if days_since > 30:
+                score -= 15
+        except Exception:
+            pass
+
+    score = max(0, min(score, 100))
+
+    if score >= 60:
+        return score, "🔥 Hot", "#ef4444"
+    elif score >= 30:
+        return score, "🟡 Warm", "#f59e0b"
+    else:
+        return score, "🧊 Cold", "#94a3b8"
+
+
+def days_since_touch(lead):
+    """Return days since last touch, or None."""
+    lt = lead.get("last_touch", "")
+    if lt:
+        try:
+            return (date.today() - date.fromisoformat(str(lt)[:10])).days
+        except Exception:
+            pass
+    return None
+
+
+def detect_duplicates(df):
+    """Find duplicate leads by email or business name. Returns dict of {lead_id: [dup_ids]}."""
+    dupes = {}
+    # Email duplicates
+    email_groups = df[df["email"].str.contains("@", na=False)].groupby(df["email"].str.lower())
+    for email, group in email_groups:
+        if len(group) > 1:
+            ids = group["id"].tolist()
+            for lid in ids:
+                dupes.setdefault(lid, set()).update(ids)
+                dupes[lid].discard(lid)
+
+    # Business name duplicates (exact match, case-insensitive)
+    biz_groups = df[df["business_name"] != ""].groupby(df["business_name"].str.lower())
+    for biz, group in biz_groups:
+        if len(group) > 1:
+            ids = group["id"].tolist()
+            for lid in ids:
+                dupes.setdefault(lid, set()).update(ids)
+                dupes[lid].discard(lid)
+
+    return {k: list(v) for k, v in dupes.items() if v}
+
+
+def analyze_email_ai(email_text, business_name=""):
+    """Use Claude to analyze an email reply for sentiment, intent, and next action."""
+    try:
+        import anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return None
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{"role": "user", "content": f"""Analyze this sales email reply from {business_name}. Return JSON only:
+{{"sentiment": "positive/neutral/negative",
+"intent": "interested/maybe/not_interested/asking_questions/objection",
+"urgency": "high/medium/low",
+"summary": "one sentence",
+"suggested_action": "what the sales rep should do next"}}
+
+Email:
+{email_text[:2000]}"""}],
+        )
+        import re
+        text = resp.content[0].text
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+    except Exception:
+        pass
+    return None
+
+
 OPT_OUT_LINE = "\n\nTo opt out, reply 'unsubscribe'."
 
 
@@ -711,6 +828,45 @@ st.markdown("""<div class="crm-header">
 cfg = load_config()
 df = load_crm()
 
+# Pre-compute lead scores and duplicates (cached per session)
+if "lead_scores" not in st.session_state or st.session_state.get("_score_stale", True):
+    _act_for_scoring = load_activity()
+    _scores = {}
+    for _, _row in df.iterrows():
+        _scores[str(_row["id"])] = score_lead(_row.to_dict(), _act_for_scoring)
+    st.session_state["lead_scores"] = _scores
+    st.session_state["_score_stale"] = False
+
+if "duplicates" not in st.session_state or st.session_state.get("_dupes_stale", True):
+    st.session_state["duplicates"] = detect_duplicates(df)
+    st.session_state["_dupes_stale"] = False
+
+LEAD_SCORES = st.session_state["lead_scores"]
+DUPLICATES = st.session_state["duplicates"]
+
+# Stale lead alerts (sidebar)
+_stale_leads = []
+for _, _r in df[df["stage"].isin(["Contacted", "Demo Booked", "Proposal"])].iterrows():
+    _ds = days_since_touch(_r.to_dict())
+    if _ds and _ds >= 7:
+        _stale_leads.append((_r["business_name"], _r["stage"], _ds, _r["id"]))
+_stale_leads.sort(key=lambda x: -x[2])
+
+if _stale_leads:
+    with st.sidebar:
+        st.markdown(f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:12px;">'
+                    f'<div style="font-weight:700;color:#ef4444;font-size:14px;">⚠️ {len(_stale_leads)} Stale Leads</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">No activity 7+ days</div></div>', unsafe_allow_html=True)
+        for _biz, _stg, _days, _lid in _stale_leads[:10]:
+            st.sidebar.button(f"🔴 {_biz} ({_days}d)", key=f"stale_{_lid}", on_click=lambda lid=_lid: st.session_state.update({"view_lead_id": str(lid)}))
+
+if DUPLICATES:
+    with st.sidebar:
+        n_dupes = len(DUPLICATES)
+        st.markdown(f'<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:12px;">'
+                    f'<div style="font-weight:700;color:#d97706;font-size:14px;">⚠️ {n_dupes} Duplicate Leads</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">Same email or business name</div></div>', unsafe_allow_html=True)
+
 # Initialise profile view state
 if "view_lead_id" not in st.session_state:
     st.session_state["view_lead_id"] = None
@@ -843,6 +999,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div class="profile-field"><div class="profile-field-label">Region</div><div class="profile-field-value">{esc(lead['region'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Source</div><div class="profile-field-value">{esc(lead['source'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Created</div><div class="profile-field-value">{esc(lead['created'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Lead score</div><div class="profile-field-value"><span style="color:{LEAD_SCORES.get(lead_id, (0,'','#94a3b8'))[2]};font-weight:600;">{LEAD_SCORES.get(lead_id, (0,'🧊 Cold','#94a3b8'))[1]} ({LEAD_SCORES.get(lead_id, (0,'',''))[0]})</span></div></div>
             <div class="profile-field"><div class="profile-field-label">Deal value</div><div class="profile-field-value">£{lead.get('deal_value', 0):,.0f}</div></div>
             <div class="profile-field"><div class="profile-field-label">Last touch</div><div class="profile-field-value">{esc(lead['last_touch'] or 'Never')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Notes</div><div class="profile-field-value">{esc(lead['notes'] or '--')}</div></div>
@@ -1006,6 +1163,30 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                     </div>""", unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
+                # AI Analysis button for received emails
+                received_emails = [item for item in timeline_items if item.get("type") == "gmail" and "Received" in item.get("title", "")]
+                if received_emails:
+                    st.divider()
+                    st.markdown("**🤖 AI Email Analysis**")
+                    if st.button("Analyze latest reply with AI", key="pv_ai_analyze"):
+                        latest = received_emails[0]
+                        with st.spinner("Analyzing with Claude..."):
+                            analysis = analyze_email_ai(latest.get("body", ""), lead.get("business_name", ""))
+                        if analysis:
+                            sentiment_colors = {"positive": "#10b981", "neutral": "#f59e0b", "negative": "#ef4444"}
+                            s_color = sentiment_colors.get(analysis.get("sentiment", ""), "#94a3b8")
+                            st.markdown(f"""<div style="background:#f8f9fb;border:1px solid #e2e4e9;border-radius:12px;padding:16px;margin-top:8px;">
+                                <div style="display:flex;gap:12px;margin-bottom:8px;">
+                                    <span style="background:{s_color}20;color:{s_color};padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Sentiment: {analysis.get('sentiment','?')}</span>
+                                    <span style="background:#eff6ff;color:#3b82f6;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Intent: {analysis.get('intent','?')}</span>
+                                    <span style="background:#f5f3ff;color:#7c3aed;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Urgency: {analysis.get('urgency','?')}</span>
+                                </div>
+                                <div style="font-size:13px;color:#1a1a2e;margin-bottom:4px;"><strong>Summary:</strong> {html_mod.escape(analysis.get('summary',''))}</div>
+                                <div style="font-size:13px;color:#7c3aed;"><strong>Suggested action:</strong> {html_mod.escape(analysis.get('suggested_action',''))}</div>
+                            </div>""", unsafe_allow_html=True)
+                        else:
+                            st.warning("AI analysis unavailable. Set ANTHROPIC_API_KEY in .env")
+
     st.stop()
 
 # ─── Tabs (normal view) ───────────────────────────────────────────────────
@@ -1134,10 +1315,18 @@ with tab_pipeline:
                     st.markdown(f'<style>[data-testid="stContainer"]:has(#card-{row["id"]}){{background:{s_bg} !important;border-left:3px solid {s_border} !important;}}</style><span id="card-{row["id"]}" style="display:none"></span>', unsafe_allow_html=True)
                     deal_val = row.get("deal_value", 0)
                     deal_line = f'<div style="font-weight:600;color:#059669;font-size:13px;">£{deal_val:,.0f}</div>' if deal_val > 0 else ""
+                    # Lead score badge
+                    _sc, _sc_label, _sc_color = LEAD_SCORES.get(str(row["id"]), (0, "🧊 Cold", "#94a3b8"))
+                    score_badge = f'<span style="background:{_sc_color}15;color:{_sc_color};padding:1px 6px;border-radius:6px;font-size:10px;font-weight:600;">{_sc_label} {_sc}</span>'
+                    # Stale alert
+                    _ds = days_since_touch(row.to_dict())
+                    stale_badge = f' <span style="color:#ef4444;font-size:10px;">🔴 {_ds}d</span>' if _ds and _ds >= 14 and stage not in ("Won", "Lost") else ""
+                    # Dupe badge
+                    dupe_badge = ' <span style="color:#d97706;font-size:10px;">⚠️ dupe</span>' if str(row["id"]) in DUPLICATES else ""
                     st.markdown(
                         f'<div class="deal-card-inner">'
-                        f'<div class="biz">{esc(row["business_name"])}</div>'
-                        f'<div class="contact">{esc(row["contact_name"])}</div>'
+                        f'<div class="biz">{esc(row["business_name"])}{stale_badge}{dupe_badge}</div>'
+                        f'<div class="contact">{esc(row["contact_name"])} {score_badge}</div>'
                         f'{deal_line}'
                         f'<div class="meta">{esc(touch)}</div>'
                         f'{na_line}{cat_line}'
@@ -2140,50 +2329,123 @@ with tab_sequences:
                 st.rerun()
 
 
-# ─── Dashboard charts ────────────────────────────────────────────────────────
+# ─── Reports ─────────────────────────────────────────────────────────────────
 with tab_charts:
     if df.empty:
         st.info("No data yet.")
     else:
-        st.subheader("Pipeline funnel")
-        stage_counts = df["stage"].value_counts().reindex(STAGES, fill_value=0)
-        st.bar_chart(stage_counts)
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Reports & Analytics</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Pipeline health, conversion rates, and activity trends</div>""", unsafe_allow_html=True)
 
+        # ── Conversion Funnel ──
+        st.markdown("### Conversion Funnel")
+        funnel_stages = ["New", "Contacted", "Demo Booked", "Proposal", "Won"]
+        funnel_counts = [len(df[df["stage"] == s]) for s in funnel_stages]
+        funnel_data = pd.DataFrame({"Stage": funnel_stages, "Leads": funnel_counts})
+        st.bar_chart(funnel_data.set_index("Stage"))
+
+        # Conversion rates between stages
+        conv_html = '<div style="display:flex;gap:8px;margin:12px 0 24px 0;">'
+        for i in range(len(funnel_stages) - 1):
+            if funnel_counts[i] > 0:
+                rate = (funnel_counts[i + 1] / funnel_counts[i]) * 100
+            else:
+                rate = 0
+            color = "#10b981" if rate >= 30 else "#f59e0b" if rate >= 10 else "#ef4444"
+            conv_html += f'<div style="background:#f8f9fb;border:1px solid #e2e4e9;border-radius:8px;padding:8px 12px;text-align:center;flex:1;">'
+            conv_html += f'<div style="font-size:11px;color:#94a3b8;">{funnel_stages[i]} → {funnel_stages[i+1]}</div>'
+            conv_html += f'<div style="font-size:18px;font-weight:700;color:{color};">{rate:.0f}%</div></div>'
+        conv_html += '</div>'
+        st.markdown(conv_html, unsafe_allow_html=True)
+
+        # ── Revenue ──
+        rp1, rp2, rp3, rp4 = st.columns(4)
+        won_rev = df[df["stage"] == "Won"]["deal_value"].sum()
+        pipe_rev = df[~df["stage"].isin(["Won", "Lost"])]["deal_value"].sum()
+        proposal_rev = df[df["stage"] == "Proposal"]["deal_value"].sum()
+        demo_rev = df[df["stage"] == "Demo Booked"]["deal_value"].sum()
+        rp1.metric("Won Revenue", f"£{won_rev:,.0f}")
+        rp2.metric("Pipeline Value", f"£{pipe_rev:,.0f}")
+        rp3.metric("In Proposal", f"£{proposal_rev:,.0f}")
+        rp4.metric("In Demo", f"£{demo_rev:,.0f}")
+
+        # Revenue forecast (weighted by stage probability)
+        stage_prob = {"New": 0.05, "Contacted": 0.1, "Demo Booked": 0.3, "Proposal": 0.6, "Won": 1.0, "Lost": 0}
+        forecast = sum(
+            float(row.get("deal_value", 0) or 0) * stage_prob.get(row.get("stage", ""), 0)
+            for _, row in df.iterrows()
+        )
+        st.markdown(f'<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;padding:16px;margin:16px 0;">'
+                    f'<div style="font-size:14px;color:#94a3b8;">Weighted Revenue Forecast</div>'
+                    f'<div style="font-size:28px;font-weight:700;color:#7c3aed;">£{forecast:,.0f}</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">Based on stage probability × deal value</div></div>', unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Activity Stats ──
+        st.markdown("### Activity")
+        act = load_activity()
+        if not act.empty:
+            act["date"] = pd.to_datetime(act["timestamp"], errors="coerce").dt.date
+            act["week"] = pd.to_datetime(act["timestamp"], errors="coerce").dt.isocalendar().week
+
+            ac1, ac2, ac3, ac4 = st.columns(4)
+            n_emails = len(act[act["type"] == "email"])
+            n_calls = len(act[act["type"] == "call"])
+            n_notes = len(act[act["type"] == "note"])
+            this_week = act[act["date"] >= (date.today() - pd.Timedelta(days=7))]
+            ac1.metric("Total Emails", n_emails)
+            ac2.metric("Total Calls", n_calls)
+            ac3.metric("Total Notes", n_notes)
+            ac4.metric("This Week", len(this_week))
+
+            # Daily activity chart
+            daily = act.groupby(["date", "type"]).size().unstack(fill_value=0)
+            st.line_chart(daily)
+            st.caption("Activity logged per day (emails, calls, notes)")
+
+            # Emails per sender (from bulk outreach)
+            if "email" in act["type"].values:
+                st.markdown("### Emails by Week")
+                email_acts = act[act["type"] == "email"].copy()
+                email_acts["week_start"] = pd.to_datetime(email_acts["date"]) - pd.to_timedelta(pd.to_datetime(email_acts["date"]).dt.dayofweek, unit="d")
+                weekly = email_acts.groupby("week_start").size()
+                if not weekly.empty:
+                    st.bar_chart(weekly)
+        else:
+            st.caption("No activity logged yet.")
+
+        st.divider()
+
+        # ── Lead Score Distribution ──
+        st.markdown("### Lead Score Distribution")
+        score_labels = {"🔥 Hot": 0, "🟡 Warm": 0, "🧊 Cold": 0}
+        for lid, (sc, label, color) in LEAD_SCORES.items():
+            if label in score_labels:
+                score_labels[label] += 1
+        sc_df = pd.DataFrame({"Category": score_labels.keys(), "Count": score_labels.values()})
+        st.bar_chart(sc_df.set_index("Category"))
+
+        # ── Top regions ──
         ch1, ch2 = st.columns(2)
         with ch1:
-            st.subheader("Leads by region")
+            st.markdown("### Top Regions")
             region_counts = df["region"].value_counts().head(15)
             if not region_counts.empty:
                 st.bar_chart(region_counts)
-
         with ch2:
-            st.subheader("Leads by category")
+            st.markdown("### Top Categories")
             cat_counts = df["category"].value_counts().head(15)
             if not cat_counts.empty:
                 st.bar_chart(cat_counts)
 
-        st.subheader("Activity over time")
-        act = load_activity()
-        if not act.empty:
-            act["date"] = pd.to_datetime(act["timestamp"]).dt.date
-            daily = act.groupby(["date", "type"]).size().unstack(fill_value=0)
-            st.line_chart(daily)
-            st.caption("Emails + calls logged per day")
+        # ── Stale leads ──
+        st.markdown("### Stale Leads (7+ days no activity)")
+        if _stale_leads:
+            stale_df = pd.DataFrame(_stale_leads, columns=["Business", "Stage", "Days Since Touch", "ID"])
+            st.dataframe(stale_df[["Business", "Stage", "Days Since Touch"]], use_container_width=True, height=300)
         else:
-            st.caption("No activity logged yet. Start sending emails and logging calls.")
-
-        st.subheader("Sequence progress")
-        sq = load_seq_queue()
-        if not sq.empty:
-            done_ct = len(sq[sq["status"] == "done"])
-            pend_ct = len(sq[sq["status"] == "pending"])
-            sq_c1, sq_c2 = st.columns(2)
-            sq_c1.metric("Steps completed", done_ct)
-            sq_c2.metric("Steps pending", pend_ct)
-            by_seq = sq.groupby(["sequence_name", "status"]).size().unstack(fill_value=0)
-            st.bar_chart(by_seq)
-        else:
-            st.caption("No sequences enrolled yet.")
+            st.success("No stale leads! All leads are being worked.")
 
 
 # ─── Add lead ────────────────────────────────────────────────────────────────
