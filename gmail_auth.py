@@ -1,7 +1,14 @@
-"""Gmail OAuth setup and sent-mail checker.
-Run once: python3 gmail_auth.py  (opens browser for OAuth consent)
-Then the CRM app uses check_sent_emails() to verify sends.
+"""Gmail OAuth setup and sent-mail checker — multi-account support.
+
+Setup per sender:
+    python3 gmail_auth.py joseph.allison@yetipay.me
+    python3 gmail_auth.py dominic.ritchie@yetipay.me
+    python3 gmail_auth.py insidesales@yetipay.me
+
+Each saves its own token: gmail_token_<email>.json
+The CRM picks the right token per sender automatically.
 """
+import sys
 import json
 import os
 from pathlib import Path
@@ -14,17 +21,32 @@ from googleapiclient.discovery import build
 
 ROOT = Path(__file__).resolve().parent
 CREDS_FILE = ROOT / "gmail_credentials.json"
-TOKEN_FILE = ROOT / "gmail_token.json"
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def get_gmail_service():
+def _token_file(email=None):
+    if email:
+        safe = email.replace("@", "_at_").replace(".", "_")
+        return ROOT / f"gmail_token_{safe}.json"
+    return ROOT / "gmail_token.json"
+
+
+def get_gmail_service(sender_email=None):
+    """Get Gmail API service. If sender_email given, use that account's token.
+    Falls back to default token if per-sender token missing.
+    """
+    token_path = _token_file(sender_email)
+    # Fallback to legacy single token
+    if not token_path.exists() and sender_email:
+        token_path = _token_file(None)
+
     creds = None
-    if TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    if token_path.exists():
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            token_path.write_text(creds.to_json())
         else:
             if not CREDS_FILE.exists():
                 print(f"Missing {CREDS_FILE}")
@@ -32,15 +54,27 @@ def get_gmail_service():
                 return None
             flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_FILE), SCOPES)
             creds = flow.run_local_server(port=8090)
-        TOKEN_FILE.write_text(creds.to_json())
+            # Save to per-sender token
+            save_path = _token_file(sender_email) if sender_email else _token_file(None)
+            save_path.write_text(creds.to_json())
     return build("gmail", "v1", credentials=creds)
 
 
-def check_sent_emails(recipient_emails, hours_back=24):
-    """Check which recipient emails appear in sent mail recently.
-    Returns set of email addresses that were found in sent folder.
-    """
-    service = get_gmail_service()
+def get_authenticated_senders():
+    """Return list of sender emails that have tokens set up."""
+    senders = []
+    for f in ROOT.glob("gmail_token_*.json"):
+        name = f.stem.replace("gmail_token_", "").replace("_at_", "@").replace("_", ".")
+        senders.append(name)
+    # Legacy single token
+    if (ROOT / "gmail_token.json").exists() and not senders:
+        senders.append("joseph.allison@yetipay.me")  # original default
+    return senders
+
+
+def check_sent_emails(recipient_emails, hours_back=24, sender_email=None):
+    """Check which recipient emails appear in sent mail recently."""
+    service = get_gmail_service(sender_email)
     if not service:
         return set()
 
@@ -62,11 +96,9 @@ def check_sent_emails(recipient_emails, hours_back=24):
     return found
 
 
-def check_bounces(recipient_emails, hours_back=72):
-    """Check which emails bounced (delivery failure notifications).
-    Returns set of email addresses that bounced.
-    """
-    service = get_gmail_service()
+def check_bounces(recipient_emails, hours_back=72, sender_email=None):
+    """Check which emails bounced (delivery failure notifications)."""
+    service = get_gmail_service(sender_email)
     if not service:
         return set()
 
@@ -88,11 +120,9 @@ def check_bounces(recipient_emails, hours_back=72):
     return bounced
 
 
-def check_replies(recipient_emails, hours_back=168):
-    """Check which recipients have replied (email FROM them in inbox).
-    Returns set of email addresses that replied.
-    """
-    service = get_gmail_service()
+def check_replies(recipient_emails, hours_back=168, sender_email=None):
+    """Check which recipients have replied (email FROM them in inbox)."""
+    service = get_gmail_service(sender_email)
     if not service:
         return set()
 
@@ -115,11 +145,19 @@ def check_replies(recipient_emails, hours_back=168):
 
 
 if __name__ == "__main__":
-    print("Authenticating with Gmail...")
-    service = get_gmail_service()
+    email_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    if email_arg:
+        print(f"Authenticating {email_arg}...")
+    else:
+        print("Usage: python3 gmail_auth.py <sender@email.com>")
+        print("Example: python3 gmail_auth.py joseph.allison@yetipay.me")
+        print("\nNo email specified — using legacy default token.")
+
+    service = get_gmail_service(email_arg)
     if service:
-        print("✅ Authenticated! Token saved to gmail_token.json")
+        token = _token_file(email_arg)
         profile = service.users().getProfile(userId="me").execute()
-        print(f"Logged in as: {profile['emailAddress']}")
+        print(f"✅ Authenticated as: {profile['emailAddress']}")
+        print(f"   Token saved: {token.name}")
     else:
         print("❌ Failed. Make sure gmail_credentials.json exists.")
