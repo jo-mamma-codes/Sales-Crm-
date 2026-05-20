@@ -126,6 +126,38 @@ def log_activity(lead_id, business_name, type_, subject, content):
     sb.table("activity").insert(row).execute()
 
 
+def load_tasks(lead_id=None):
+    q = sb.table("tasks").select("*")
+    if lead_id:
+        q = q.eq("lead_id", int(lead_id))
+    try:
+        r = q.order("due_date").execute()
+        return r.data or []
+    except Exception:
+        return []
+
+
+def create_task(lead_id, title, due_date=None, assigned_to=None, notes=None):
+    row = {"lead_id": int(lead_id), "title": title, "status": "pending"}
+    if due_date:
+        row["due_date"] = due_date
+    if assigned_to:
+        row["assigned_to"] = assigned_to
+    if notes:
+        row["notes"] = notes
+    try:
+        sb.table("tasks").insert(row).execute()
+    except Exception:
+        pass
+
+
+def update_task(task_id, updates):
+    try:
+        sb.table("tasks").update(updates).eq("id", int(task_id)).execute()
+    except Exception:
+        pass
+
+
 OPT_OUT_LINE = "\n\nTo opt out, reply 'unsubscribe'."
 
 
@@ -297,7 +329,7 @@ DEFAULT_TARGET = 20
 COLUMNS = [
     "id", "business_name", "contact_name", "phone", "email",
     "region", "category", "stage", "last_touch", "next_action_date",
-    "next_action", "notes", "source", "created", "pipeline",
+    "next_action", "notes", "source", "created", "pipeline", "deal_value",
 ]
 
 
@@ -329,7 +361,9 @@ def load_crm():
             if c not in df.columns:
                 df[c] = ""
         for c in df.columns:
-            df[c] = df[c].astype(str)
+            if c != "deal_value":
+                df[c] = df[c].astype(str)
+        df["deal_value"] = pd.to_numeric(df.get("deal_value", 0), errors="coerce").fillna(0)
         return df[COLUMNS]
     return pd.DataFrame(columns=COLUMNS)
 
@@ -697,18 +731,36 @@ if global_search and not df.empty:
     m = (df["business_name"].str.contains(global_search, case=False, na=False)
          | df["email"].str.contains(global_search, case=False, na=False)
          | df["contact_name"].str.contains(global_search, case=False, na=False)
-         | df["phone"].str.contains(global_search, case=False, na=False))
+         | df["phone"].str.contains(global_search, case=False, na=False)
+         | df["notes"].str.contains(global_search, case=False, na=False))
     results = df[m].head(10)
     if results.empty:
-        st.caption("No results")
+        st.caption("No lead results")
     else:
+        st.markdown("**Leads**")
         for _, r in results.iterrows():
             rc1, rc2, rc3, rc4 = st.columns([2, 2, 1, 1])
             rc1.write(f"**{r['business_name']}** — {r['contact_name']}")
             rc2.write(r["email"])
             rc3.write(r["stage"])
             rc4.button("View", key=f"gs_{r['id']}", on_click=open_profile, args=(r["id"],))
-        st.divider()
+
+    # Search activities too
+    act_df = load_activity()
+    if not act_df.empty:
+        am = (act_df["subject"].str.contains(global_search, case=False, na=False)
+              | act_df["content"].str.contains(global_search, case=False, na=False)
+              | act_df["business_name"].str.contains(global_search, case=False, na=False))
+        act_results = act_df[am].head(5)
+        if not act_results.empty:
+            st.markdown("**Activity matches**")
+            for _, a in act_results.iterrows():
+                ac1, ac2, ac3 = st.columns([2, 3, 1])
+                ac1.write(f"**{a['business_name']}** · {a['type']}")
+                ac2.caption(f"{a['subject']} — {a['timestamp'][:10]}")
+                ac3.button("View", key=f"gs_act_{a['id']}", on_click=open_profile, args=(str(a["lead_id"]),))
+
+    st.divider()
 
 # KPI bar
 won = len(df[df["stage"] == "Won"])
@@ -719,13 +771,16 @@ in_pipe = len(df[~df["stage"].isin(["Won", "Lost"])])
 pct = min(won / target, 1.0) if target else 0
 
 contacted = len(df[df["stage"] == "Contacted"])
+pipeline_rev = df[~df["stage"].isin(["Won", "Lost"])]["deal_value"].sum()
+won_rev = df[df["stage"] == "Won"]["deal_value"].sum()
 st.markdown(f"""
 <div class="kpi-bar">
     <div class="kpi-card" style="background:#ecfdf5; border-color:#d1fae5;"><div class="num" style="color:#059669;">{won}/{target}</div><div class="label">Deals Won</div><div class="sub">{pct*100:.0f}% of target</div></div>
+    <div class="kpi-card" style="background:#ecfdf5; border-color:#d1fae5;"><div class="num" style="color:#059669;">£{won_rev:,.0f}</div><div class="label">Won Revenue</div></div>
+    <div class="kpi-card" style="background:#f5f3ff; border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">£{pipeline_rev:,.0f}</div><div class="label">Pipeline Value</div></div>
     <div class="kpi-card" style="background:#fef3c7; border-color:#fde68a;"><div class="num" style="color:#d97706;">{remaining}</div><div class="label">To Go</div></div>
     <div class="kpi-card" style="background:#fef2f2; border-color:#fecaca;"><div class="num" style="color:#dc2626;">{days_left}</div><div class="label">Days Left</div></div>
     <div class="kpi-card" style="background:#eff6ff; border-color:#bfdbfe;"><div class="num" style="color:#2563eb;">{contacted}</div><div class="label">Contacted</div></div>
-    <div class="kpi-card" style="background:#f5f3ff; border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">{in_pipe:,}</div><div class="label">In Pipeline</div></div>
     <div class="kpi-card" style="background:#f8f9fb; border-color:#e2e4e9;"><div class="num">{len(df):,}</div><div class="label">Total Leads</div></div>
 </div>
 <div class="target-bar"><div class="target-fill" style="width:{pct*100:.0f}%"></div></div>
@@ -788,6 +843,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div class="profile-field"><div class="profile-field-label">Region</div><div class="profile-field-value">{esc(lead['region'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Source</div><div class="profile-field-value">{esc(lead['source'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Created</div><div class="profile-field-value">{esc(lead['created'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Deal value</div><div class="profile-field-value">£{lead.get('deal_value', 0):,.0f}</div></div>
             <div class="profile-field"><div class="profile-field-label">Last touch</div><div class="profile-field-value">{esc(lead['last_touch'] or 'Never')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Notes</div><div class="profile-field-value">{esc(lead['notes'] or '--')}</div></div>
         </div>""", unsafe_allow_html=True)
@@ -807,17 +863,18 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                     pass
             new_nad = st.date_input("Next action date", value=nad_val, key="pv_nad")
             new_na = st.text_input("Next action", lead["next_action"], key="pv_na")
+            new_deal_value = st.number_input("Deal value (£)", value=float(lead.get("deal_value") or 0), min_value=0.0, step=50.0, key="pv_deal")
             new_notes = st.text_area("Notes", lead["notes"], height=80, key="pv_notes")
             if st.button("Save", type="primary", key="pv_save"):
                 save_lead(lead_id, {
                     "contact_name": new_contact, "phone": new_phone, "email": new_email,
                     "stage": new_stage, "next_action_date": new_nad.isoformat() if new_nad else "",
-                    "next_action": new_na, "notes": new_notes,
+                    "next_action": new_na, "notes": new_notes, "deal_value": new_deal_value,
                 })
                 st.rerun()
 
     with main:
-        act_tab = st.radio("", ["Email", "Call / Note", "Timeline"], horizontal=True, key="pv_action_tab")
+        act_tab = st.radio("", ["Email", "Call / Note", "Tasks", "Timeline"], horizontal=True, key="pv_action_tab")
 
         if act_tab == "Email":
             tmpl_names = list(templates.keys())
@@ -860,12 +917,57 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                 else:
                     st.error("Add subject or details")
 
+        elif act_tab == "Tasks":
+            lead_tasks = load_tasks(lead_id)
+            pending = [t for t in lead_tasks if t.get("status") == "pending"]
+            done = [t for t in lead_tasks if t.get("status") == "done"]
+
+            st.markdown("**Add task**")
+            tc1, tc2, tc3 = st.columns([3, 2, 1])
+            t_title = tc1.text_input("Task", key="pv_task_title", placeholder="e.g. Call back Thursday", label_visibility="collapsed")
+            t_due = tc2.date_input("Due", value=None, key="pv_task_due", label_visibility="collapsed")
+            t_assigned = tc3.selectbox("Assign", [s["name"] for s in SENDERS], key="pv_task_assign", label_visibility="collapsed")
+            if st.button("Add task", type="primary", key="pv_task_add"):
+                if t_title:
+                    create_task(lead_id, t_title, due_date=t_due.isoformat() if t_due else None, assigned_to=t_assigned)
+                    st.rerun()
+
+            if pending:
+                st.markdown("**Pending**")
+                for t in pending:
+                    tc1, tc2, tc3 = st.columns([4, 2, 1])
+                    overdue = ""
+                    if t.get("due_date"):
+                        try:
+                            if date.fromisoformat(str(t["due_date"])) < date.today():
+                                overdue = " 🔴"
+                        except Exception:
+                            pass
+                    tc1.markdown(f"**{t['title']}**{overdue}")
+                    tc2.caption(f"Due: {t.get('due_date', '--')} · {t.get('assigned_to', '')}")
+                    if tc3.button("✅", key=f"pv_tdone_{t['id']}"):
+                        update_task(t["id"], {"status": "done"})
+                        st.rerun()
+
+            if done:
+                with st.expander(f"Completed ({len(done)})"):
+                    for t in done:
+                        st.caption(f"~~{t['title']}~~ — {t.get('due_date', '')}")
+
+            if not pending and not done:
+                st.caption("No tasks yet.")
+
         elif act_tab == "Timeline":
             timeline_items = []
             act_df = load_activity()
             lead_act = act_df[act_df["lead_id"] == str(lead_id)]
             for _, r in lead_act.iterrows():
                 timeline_items.append({"timestamp": r["timestamp"], "type": r["type"], "title": r["subject"] or r["type"].title(), "body": r["content"], "source": "crm"})
+
+            # Include tasks in timeline
+            for t in load_tasks(lead_id):
+                status_label = "✅ " if t.get("status") == "done" else "⏳ "
+                timeline_items.append({"timestamp": t.get("created_at", ""), "type": "task", "title": f"{status_label}{t['title']}", "body": f"Due: {t.get('due_date', '--')} · {t.get('assigned_to', '')}", "source": "crm"})
 
             cached_gmail = load_gmail_cache(lead["email"]) if lead["email"] else None
             if cached_gmail:
@@ -893,8 +995,8 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                     if month_label and month_label != current_month:
                         current_month = month_label
                         st.markdown(f'<div class="timeline-month">{esc(month_label)}</div>', unsafe_allow_html=True)
-                    dot_cls = {"email": "timeline-dot-email", "call": "timeline-dot-call", "note": "timeline-dot-note", "gmail": "timeline-dot-gmail"}.get(item["type"], "timeline-dot-note")
-                    type_label = {"email": "Email logged", "call": "Call logged", "note": "Note", "gmail": "Gmail"}.get(item["type"], item["type"])
+                    dot_cls = {"email": "timeline-dot-email", "call": "timeline-dot-call", "note": "timeline-dot-note", "gmail": "timeline-dot-gmail", "task": "timeline-dot-note"}.get(item["type"], "timeline-dot-note")
+                    type_label = {"email": "Email logged", "call": "Call logged", "note": "Note", "gmail": "Gmail", "task": "Task"}.get(item["type"], item["type"])
                     body_html = f'<div class="timeline-body">{esc(item["body"][:500])}</div>' if item["body"] else ""
                     st.markdown(f"""<div class="timeline-item">
                         <div class="timeline-dot {dot_cls}"></div>
@@ -907,8 +1009,8 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     st.stop()
 
 # ─── Tabs (normal view) ───────────────────────────────────────────────────
-tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_followup, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
-    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Follow Up", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
+tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_followup, tab_tasks, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
+    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Follow Up", "Tasks", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
 )
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
@@ -944,8 +1046,9 @@ with tab_pipeline:
             nd_region = nc1.text_input("Region", key="nd_region")
             nd_category = nc2.text_input("Category", key="nd_category")
             nd_stage = nc1.selectbox("Stage", active_stages, key="nd_stage")
-            nd_nad = nc2.date_input("Next action date", value=None, key="nd_nad")
-            nd_na = st.text_input("Next action", key="nd_na")
+            nd_deal_val = nc2.number_input("Deal value (£)", value=0.0, min_value=0.0, step=50.0, key="nd_deal_val")
+            nd_nad = nc1.date_input("Next action date", value=None, key="nd_nad")
+            nd_na = nc2.text_input("Next action", key="nd_na")
             nd_notes = st.text_area("Notes", key="nd_notes")
             fc1, fc2 = st.columns(2)
             if fc1.form_submit_button("Add deal", type="primary"):
@@ -961,7 +1064,7 @@ with tab_pipeline:
                         "next_action_date": nd_nad.isoformat() if nd_nad else None,
                         "next_action": nd_na or None, "notes": nd_notes or None,
                         "source": "manual", "created": date.today().isoformat(),
-                        "pipeline": active_pipeline,
+                        "pipeline": active_pipeline, "deal_value": nd_deal_val,
                     }
                     sb.table("leads").insert(new_deal).execute()
                     st.success(f"Added {nd_biz} to {active_pipeline} pipeline")
@@ -1014,8 +1117,10 @@ with tab_pipeline:
         show_count = len(stage_df) if expanded else CARDS_DEFAULT
 
         with cols[i]:
+            stage_rev = stage_df["deal_value"].sum()
+            rev_html = f' · <span style="font-weight:400;font-size:12px;">£{stage_rev:,.0f}</span>' if stage_rev > 0 else ""
             st.markdown(
-                f'<div class="kanban-header {cls}">{stage}<span class="count"> {len(stage_df)}</span></div>',
+                f'<div class="kanban-header {cls}">{stage}<span class="count"> {len(stage_df)}</span>{rev_html}</div>',
                 unsafe_allow_html=True,
             )
             for _, row in stage_df.head(show_count).iterrows():
@@ -1027,10 +1132,13 @@ with tab_pipeline:
                 s_border, s_bg = STAGE_TINTS.get(stage, ("#e2e4e9", "#fff"))
                 with st.container(border=True):
                     st.markdown(f'<style>[data-testid="stContainer"]:has(#card-{row["id"]}){{background:{s_bg} !important;border-left:3px solid {s_border} !important;}}</style><span id="card-{row["id"]}" style="display:none"></span>', unsafe_allow_html=True)
+                    deal_val = row.get("deal_value", 0)
+                    deal_line = f'<div style="font-weight:600;color:#059669;font-size:13px;">£{deal_val:,.0f}</div>' if deal_val > 0 else ""
                     st.markdown(
                         f'<div class="deal-card-inner">'
                         f'<div class="biz">{esc(row["business_name"])}</div>'
                         f'<div class="contact">{esc(row["contact_name"])}</div>'
+                        f'{deal_line}'
                         f'<div class="meta">{esc(touch)}</div>'
                         f'{na_line}{cat_line}'
                         f'</div>',
@@ -1818,6 +1926,103 @@ with tab_followup:
                     if fc4.button("📞 Book demo", key=f"fu_demo_{lead['id']}"):
                         save_lead(lead["id"], {"stage": "Demo Booked"})
                         st.rerun()
+
+
+# ─── Tasks ───────────────────────────────────────────────────────────────────
+with tab_tasks:
+    st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Task Manager</div>
+    <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Track follow-ups, calls, and to-dos across all leads</div>""", unsafe_allow_html=True)
+
+    all_tasks = load_tasks()
+    today_dt = date.today()
+
+    # Auto-create follow-up tasks for stale leads (7+ days no reply)
+    if "automations_ran" not in st.session_state:
+        st.session_state["automations_ran"] = True
+        try:
+            stale = df[(df["stage"] == "Contacted") & (df["last_touch"] != "")]
+            auto_created = 0
+            existing_task_leads = {t["lead_id"] for t in all_tasks if t.get("status") == "pending"}
+            for _, row in stale.iterrows():
+                try:
+                    lt = date.fromisoformat(str(row["last_touch"])[:10])
+                    if (today_dt - lt).days >= 7 and int(row["id"]) not in existing_task_leads:
+                        create_task(row["id"], f"Follow up — no reply in {(today_dt - lt).days}d",
+                                    due_date=today_dt.isoformat(), assigned_to=SENDERS[0]["name"])
+                        auto_created += 1
+                except Exception:
+                    continue
+            if auto_created:
+                st.toast(f"🤖 Auto-created {auto_created} follow-up tasks for stale leads")
+                all_tasks = load_tasks()  # reload
+        except Exception:
+            pass
+
+    # KPIs
+    pending_tasks = [t for t in all_tasks if t.get("status") == "pending"]
+    overdue_tasks = [t for t in pending_tasks if t.get("due_date") and t["due_date"] < today_dt.isoformat()]
+    today_tasks = [t for t in pending_tasks if t.get("due_date") == today_dt.isoformat()]
+    done_tasks = [t for t in all_tasks if t.get("status") == "done"]
+
+    st.markdown(f"""<div style="display:flex;gap:12px;margin-bottom:16px;">
+        <div class="kpi-card" style="background:#fef2f2;border-color:#fecaca;"><div class="num" style="color:#ef4444;">{len(overdue_tasks)}</div><div class="label">Overdue</div></div>
+        <div class="kpi-card" style="background:#eff6ff;border-color:#bfdbfe;"><div class="num" style="color:#3b82f6;">{len(today_tasks)}</div><div class="label">Due Today</div></div>
+        <div class="kpi-card" style="background:#f5f3ff;border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">{len(pending_tasks)}</div><div class="label">Pending</div></div>
+        <div class="kpi-card" style="background:#f0fdf9;border-color:#bbf7d0;"><div class="num" style="color:#10b981;">{len(done_tasks)}</div><div class="label">Done</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    # New task form
+    with st.expander("➕ New task", expanded=False):
+        ntc1, ntc2 = st.columns(2)
+        nt_lead = ntc1.selectbox("Lead", df["business_name"].tolist(), key="nt_lead_pick")
+        nt_title = ntc2.text_input("Task title", key="nt_title", placeholder="e.g. Call back Thursday")
+        ntc3, ntc4 = st.columns(2)
+        nt_due = ntc3.date_input("Due date", value=today_dt, key="nt_due")
+        nt_assign = ntc4.selectbox("Assign to", [s["name"] for s in SENDERS], key="nt_assign")
+        if st.button("Create task", type="primary", key="nt_create"):
+            if nt_title:
+                lead_match = df[df["business_name"] == nt_lead]
+                if not lead_match.empty:
+                    create_task(lead_match.iloc[0]["id"], nt_title, due_date=nt_due.isoformat(), assigned_to=nt_assign)
+                    st.success(f"Task created: {nt_title}")
+                    st.rerun()
+
+    # Task filter
+    task_filter = st.radio("Show", ["Overdue", "Today", "All Pending", "Completed"], horizontal=True, key="task_filter")
+
+    if task_filter == "Overdue":
+        show_tasks = overdue_tasks
+    elif task_filter == "Today":
+        show_tasks = today_tasks
+    elif task_filter == "All Pending":
+        show_tasks = pending_tasks
+    else:
+        show_tasks = done_tasks
+
+    if not show_tasks:
+        st.caption("No tasks in this view.")
+    else:
+        for t in show_tasks:
+            lead_name = ""
+            lead_match = df[df["id"] == str(t["lead_id"])]
+            if not lead_match.empty:
+                lead_name = lead_match.iloc[0]["business_name"]
+
+            overdue_badge = ""
+            if t.get("due_date") and t["due_date"] < today_dt.isoformat() and t.get("status") == "pending":
+                overdue_badge = ' <span style="background:#fef2f2;color:#ef4444;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">OVERDUE</span>'
+
+            with st.container(border=True):
+                tc1, tc2, tc3, tc4 = st.columns([3, 2, 2, 1])
+                tc1.markdown(f"**{t['title']}**{overdue_badge}", unsafe_allow_html=True)
+                tc2.caption(f"📍 {lead_name}")
+                tc3.caption(f"📅 {t.get('due_date', '--')} · 👤 {t.get('assigned_to', '')}")
+                if t.get("status") == "pending":
+                    if tc4.button("✅ Done", key=f"t_done_{t['id']}"):
+                        update_task(t["id"], {"status": "done"})
+                        st.rerun()
+                else:
+                    tc4.caption("✅")
 
 
 # ─── Sequences ───────────────────────────────────────────────────────────────
