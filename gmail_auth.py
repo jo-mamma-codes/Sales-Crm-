@@ -62,6 +62,58 @@ def check_sent_emails(recipient_emails, hours_back=24):
     return found
 
 
+def check_bounces(recipient_emails, hours_back=72):
+    """Check which emails bounced (delivery failure notifications).
+    Returns set of email addresses that bounced.
+    """
+    service = get_gmail_service()
+    if not service:
+        return set()
+
+    after = datetime.now() - timedelta(hours=hours_back)
+    after_str = after.strftime("%Y/%m/%d")
+    bounced = set()
+
+    for email in recipient_emails:
+        query = f'("{email}" subject:("delivery" OR "undeliverable" OR "returned" OR "failure" OR "bounce" OR "not delivered")) after:{after_str}'
+        try:
+            results = service.users().messages().list(
+                userId="me", q=query, maxResults=1
+            ).execute()
+            if results.get("messages"):
+                bounced.add(email.lower())
+        except Exception:
+            continue
+
+    return bounced
+
+
+def check_replies(recipient_emails, hours_back=168):
+    """Check which recipients have replied (email FROM them in inbox).
+    Returns set of email addresses that replied.
+    """
+    service = get_gmail_service()
+    if not service:
+        return set()
+
+    after = datetime.now() - timedelta(hours=hours_back)
+    after_str = after.strftime("%Y/%m/%d")
+    replied = set()
+
+    for email in recipient_emails:
+        query = f"from:{email} after:{after_str} in:inbox"
+        try:
+            results = service.users().messages().list(
+                userId="me", q=query, maxResults=1
+            ).execute()
+            if results.get("messages"):
+                replied.add(email.lower())
+        except Exception:
+            continue
+
+    return replied
+
+
 if __name__ == "__main__":
     print("Authenticating with Gmail...")
     service = get_gmail_service()

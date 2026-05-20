@@ -147,10 +147,10 @@ def mailto_link(to, subject, body):
 
 
 SENDERS = [
-    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 40, "chrome_profile": "Profile 5"},
-    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 40, "chrome_profile": "Profile 4"},
-    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 40, "chrome_profile": "Profile 1"},
-    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 40, "chrome_profile": "Profile 5"},  # no own profile yet
+    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 100, "chrome_profile": "Profile 5"},
+    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 100, "chrome_profile": "Profile 4"},
+    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 100, "chrome_profile": "Profile 1"},
+    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 100, "chrome_profile": "Profile 5"},  # no own profile yet
 ]
 SENDER_PROFILE = {s["email"]: s["chrome_profile"] for s in SENDERS}
 SEND_TRACKER = ROOT / "send_tracker.json"
@@ -907,8 +907,8 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     st.stop()
 
 # ─── Tabs (normal view) ───────────────────────────────────────────────────
-tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
-    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
+tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_followup, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
+    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Follow Up", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
 )
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
@@ -1705,6 +1705,123 @@ with tab_bulk:
                 st.session_state["bulk_sent"] = set()
                 st.session_state["bulk_opened"] = set()
                 st.rerun()
+
+
+# ─── Follow Up ───────────────────────────────────────────────────────────────
+with tab_followup:
+    contacted = df[df["stage"] == "Contacted"].copy()
+    if contacted.empty:
+        st.info("No contacted leads to follow up with yet.")
+    else:
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Follow Up Centre</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Follow up with leads you've already emailed — detect bounces & replies</div>""", unsafe_allow_html=True)
+
+        # Status tags stored in notes field: [BOUNCED] [REPLIED]
+        def _fu_status(row):
+            notes = str(row.get("notes", "") or "")
+            if "[BOUNCED]" in notes:
+                return "Bounced"
+            if "[REPLIED]" in notes:
+                return "Replied"
+            return "Awaiting Reply"
+
+        contacted["fu_status"] = contacted.apply(_fu_status, axis=1)
+
+        # KPI row
+        n_awaiting = len(contacted[contacted["fu_status"] == "Awaiting Reply"])
+        n_replied = len(contacted[contacted["fu_status"] == "Replied"])
+        n_bounced = len(contacted[contacted["fu_status"] == "Bounced"])
+        st.markdown(f"""<div style="display:flex;gap:12px;margin-bottom:16px;">
+            <div class="kpi-card" style="background:#eff6ff;border-color:#bfdbfe;"><div class="num" style="color:#2563eb;">{n_awaiting}</div><div class="label">Awaiting Reply</div></div>
+            <div class="kpi-card" style="background:#f0fdf9;border-color:#bbf7d0;"><div class="num" style="color:#10b981;">{n_replied}</div><div class="label">Replied</div></div>
+            <div class="kpi-card" style="background:#fef2f2;border-color:#fecaca;"><div class="num" style="color:#ef4444;">{n_bounced}</div><div class="label">Bounced</div></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Scan Gmail for bounces & replies
+        fu_c1, fu_c2, fu_c3 = st.columns(3)
+        if fu_c1.button("🔍 Scan for bounces & replies", type="primary", key="fu_scan"):
+            try:
+                from gmail_auth import check_bounces, check_replies
+                emails_to_check = contacted[contacted["fu_status"] == "Awaiting Reply"]["email"].dropna().str.lower().tolist()
+                if emails_to_check:
+                    with st.spinner(f"Scanning {len(emails_to_check)} emails..."):
+                        bounced = check_bounces(emails_to_check, hours_back=168)
+                        replied = check_replies(emails_to_check, hours_back=168)
+                    tagged = 0
+                    for _, row in contacted.iterrows():
+                        e = str(row["email"]).lower()
+                        notes = str(row.get("notes", "") or "")
+                        if e in bounced and "[BOUNCED]" not in notes:
+                            save_lead(row["id"], {"notes": notes + " [BOUNCED]", "stage": "Lost"})
+                            tagged += 1
+                        elif e in replied and "[REPLIED]" not in notes:
+                            save_lead(row["id"], {"notes": notes + " [REPLIED]"})
+                            tagged += 1
+                    st.success(f"Found {len(bounced)} bounces, {len(replied)} replies. Tagged {tagged} leads.")
+                    st.rerun()
+                else:
+                    st.info("No awaiting-reply leads to scan.")
+            except Exception as e:
+                st.error(f"Gmail scan failed: {e}")
+
+        # Filter
+        fu_filter = fu_c2.selectbox("Show", ["Awaiting Reply", "All", "Replied", "Bounced"], key="fu_filter")
+        if fu_filter != "All":
+            show_fu = contacted[contacted["fu_status"] == fu_filter]
+        else:
+            show_fu = contacted
+
+        # Follow-up template
+        templates = load_templates()
+        fu_tmpl = fu_c3.selectbox("Follow-up template", list(templates.keys()), key="fu_tmpl")
+
+        st.caption(f"Showing {len(show_fu)} leads")
+
+        # Days since last touch
+        today_dt = date.today()
+        for idx, row in show_fu.iterrows():
+            lead = row.to_dict()
+            lt = lead.get("last_touch", "")
+            if lt:
+                try:
+                    days_ago = (today_dt - date.fromisoformat(str(lt)[:10])).days
+                except Exception:
+                    days_ago = "?"
+            else:
+                days_ago = "?"
+
+            status = lead.get("fu_status", "Awaiting Reply")
+            if status == "Bounced":
+                badge = '<span style="background:#fef2f2;color:#ef4444;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">⛔ Bounced</span>'
+            elif status == "Replied":
+                badge = '<span style="background:#f0fdf9;color:#10b981;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">✅ Replied</span>'
+            else:
+                badge = '<span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">⏳ Awaiting</span>'
+
+            with st.container(border=True):
+                fc1, fc2, fc3, fc4, fc5 = st.columns([3, 2, 1, 1, 1])
+                fc1.markdown(f"**{html_mod.escape(str(lead.get('business_name', '')))}** &nbsp; {badge}", unsafe_allow_html=True)
+                fc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(str(lead.get("email", "")))}</span>', unsafe_allow_html=True)
+                fc3.markdown(f'<span style="font-size:12px;color:#64748b;">{days_ago}d ago</span>', unsafe_allow_html=True)
+
+                if status == "Awaiting Reply":
+                    # Generate follow-up link
+                    subj, body = render_template(templates[fu_tmpl], lead)
+                    link = gmail_link(lead["email"], subj, body)
+                    if fc4.button("✉️ Follow up", key=f"fu_send_{lead['id']}"):
+                        import subprocess
+                        profile_dir = SENDER_PROFILE.get(SENDERS[0]["email"], "Profile 5")
+                        subprocess.Popen([
+                            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                            f"--profile-directory={profile_dir}", link
+                        ])
+                    if fc5.button("🚫", key=f"fu_dne_{lead['id']}", help="Do not email — move to Lost"):
+                        save_lead(lead["id"], {"stage": "Lost", "notes": str(lead.get("notes", "") or "") + " [DO NOT EMAIL]"})
+                        st.rerun()
+                elif status == "Replied":
+                    if fc4.button("📞 Book demo", key=f"fu_demo_{lead['id']}"):
+                        save_lead(lead["id"], {"stage": "Demo Booked"})
+                        st.rerun()
 
 
 # ─── Sequences ───────────────────────────────────────────────────────────────
