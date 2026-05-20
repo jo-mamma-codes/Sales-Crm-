@@ -147,11 +147,12 @@ def mailto_link(to, subject, body):
 
 
 SENDERS = [
-    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 40},
-    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 40},
-    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 40},
-    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 40},
+    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 40, "chrome_profile": "Profile 5"},
+    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 40, "chrome_profile": "Profile 4"},
+    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 40, "chrome_profile": "Profile 1"},
+    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 40, "chrome_profile": "Profile 5"},  # no own profile yet
 ]
+SENDER_PROFILE = {s["email"]: s["chrome_profile"] for s in SENDERS}
 SEND_TRACKER = ROOT / "send_tracker.json"
 
 
@@ -180,8 +181,6 @@ def gmail_link(to, subject, body, sender_email=None):
     su = urllib.parse.quote(subject, safe="")
     bo = urllib.parse.quote(body, safe="")
     url = f"https://mail.google.com/mail/u/0/?view=cm&fs=1&to={to}&su={su}&body={bo}"
-    if sender_email:
-        url += f"&authuser={sender_email}"
     return url
 
 DEFAULT_SEQUENCES = {
@@ -1405,11 +1404,53 @@ with tab_bulk:
         bc1, bc2 = st.columns(2)
         tmpl_pick = bc1.selectbox("Template", list(templates.keys()), key="b_tmpl")
         stage_pick = bc2.multiselect("Filter by stage", STAGES, default=["New"], key="b_stage")
-        region_pick = st.text_input("Region contains (optional)", key="b_region")
+        INDUSTRY_GROUPS = {
+            "Restaurant": ["restaurant", "italian_restaurant", "pizza_restaurant", "seafood_restaurant",
+                "japanese_restaurant", "chinese_restaurant", "mexican_restaurant", "indian_restaurant",
+                "thai_restaurant", "american_restaurant", "british_restaurant", "sri_lankan_restaurant",
+                "mediterranean_restaurant", "breakfast_restaurant", "steak_house", "hamburger_restaurant",
+                "bistro", "gastropub", "deli", "catering_service"],
+            "Cafe & Coffee": ["cafe", "coffee_shop", "coffee_roastery", "tea_store", "tea_house",
+                "ice_cream_shop", "cake_shop", "pastry_shop", "confectionery", "chocolate_factory"],
+            "Bar & Pub": ["bar", "pub", "wine_bar", "cocktail_bar", "sports_bar", "bar_and_grill",
+                "night_club", "brewpub", "brewery"],
+            "Beauty & Hair": ["beauty_salon", "hair_salon", "nail_salon", "barber_shop",
+                "skin_care_clinic", "body_art_service", "spa", "massage", "tailor",
+                "womens_clothing_store"],
+            "Health & Fitness": ["gym", "fitness_center", "yoga_studio", "wellness_center",
+                "physiotherapist", "chiropractor", "medical_clinic", "medical_center",
+                "sports_school", "sports_complex", "sportswear_store", "health"],
+            "Retail - Fashion": ["clothing_store", "shoe_store", "jewelry_store", "thrift_store"],
+            "Retail - Home": ["furniture_store", "home_goods_store", "home_improvement_store",
+                "building_materials_store", "garden_center", "florist", "painter"],
+            "Retail - Food": ["food_store", "bakery", "butcher_shop", "grocery_store",
+                "supermarket", "asian_grocery_store", "market", "farm", "liquor_store", "food"],
+            "Retail - Other": ["store", "gift_shop", "book_store", "toy_store", "electronics_store",
+                "sporting_goods_store", "bicycle_store", "auto_parts_store", "pet_store",
+                "department_store"],
+            "Art & Gallery": ["art_gallery", "art_studio"],
+            "Hospitality": ["hotel", "lodging", "event_venue", "wedding_venue", "tourist_attraction",
+                "tour_agency", "visitor_center", "aquarium"],
+            "Professional Services": ["general_contractor", "manufacturer", "consultant",
+                "corporate_office", "supplier", "wholesaler", "service", "storage", "laundry"],
+            "Community & Education": ["non_profit_organization", "community_center", "school",
+                "university", "research_institute", "child_care_agency", "local_government_office",
+                "performing_arts_theater", "sports_school"],
+            "Pets": ["pet_store", "pet_boarding_service"],
+            "Other": ["establishment", "point_of_interest"],
+        }
+        bc3, bc4 = st.columns(2)
+        region_pick = bc3.text_input("Region contains (optional)", key="b_region")
+        industry_pick = bc4.multiselect("Industry", sorted(INDUSTRY_GROUPS.keys()), key="b_industry")
 
         pool = df[df["stage"].isin(stage_pick)] if stage_pick else df.copy()
         if region_pick:
             pool = pool[pool["region"].str.contains(region_pick, case=False, na=False)]
+        if industry_pick:
+            allowed_cats = set()
+            for grp in industry_pick:
+                allowed_cats.update(INDUSTRY_GROUPS[grp])
+            pool = pool[pool["category"].isin(allowed_cats)]
         pool = pool[pool["email"].str.contains("@", na=False)]
         pool = pool[~pool["email"].str.lower().str.startswith(
             ("info@", "hello@", "contact@", "enquiries@", "admin@", "sales@", "office@", "reception@", "bookings@")
@@ -1464,33 +1505,42 @@ with tab_bulk:
         if limit > remaining_today:
             st.error(f"Only {remaining_today} sends left across all inboxes today. Lower the limit or wait til tomorrow.")
 
-        if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
-            links = []
-            sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
+        def _generate_links():
+            _links = []
+            _sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
             for _, row in batch.iterrows():
-                sender = None
+                _sender = None
                 for s in SENDERS:
-                    if sender_counts[s["email"]] < s["daily_cap"]:
-                        sender = s
+                    if _sender_counts[s["email"]] < s["daily_cap"]:
+                        _sender = s
                         break
-                if not sender:
+                if not _sender:
                     break
-                lead = row.to_dict()
-                s, b = render_template(templates[tmpl_pick], lead)
-                gm = gmail_link(lead["email"], s, b, sender_email=sender["email"])
-                links.append({
-                    "business": lead["business_name"], "email": lead["email"],
-                    "link": gm, "sender": sender["email"],
-                    "lead_id": lead["id"], "subject": s, "body": b,
+                _lead = row.to_dict()
+                _s, _b = render_template(templates[tmpl_pick], _lead)
+                _gm = gmail_link(_lead["email"], _s, _b, sender_email=_sender["email"])
+                _links.append({
+                    "business": _lead["business_name"], "email": _lead["email"],
+                    "link": _gm, "sender": _sender["email"],
+                    "lead_id": _lead["id"], "subject": _s, "body": _b,
                 })
-                sender_counts[sender["email"]] += 1
-            st.session_state["bulk_links"] = links
+                _sender_counts[_sender["email"]] += 1
+            return _links
+
+        if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
+            st.session_state["bulk_links"] = _generate_links()
             st.rerun()
+
+        if st.session_state.get("bulk_auto_regen"):
+            st.session_state["bulk_auto_regen"] = False
+            st.session_state["bulk_links"] = _generate_links()
 
         if st.session_state.get("bulk_links"):
             links = st.session_state["bulk_links"]
             if "bulk_sent" not in st.session_state:
                 st.session_state["bulk_sent"] = set()
+            if "bulk_opened" not in st.session_state:
+                st.session_state["bulk_opened"] = set()
             sent_set = st.session_state["bulk_sent"]
             unsent = [i for i, l in enumerate(links) if i not in sent_set]
             prog_pct = len(sent_set) / len(links) * 100 if links else 0
@@ -1511,15 +1561,17 @@ with tab_bulk:
                     st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                 if i in sent_set:
                     st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
-                else:
-                    lc1, lc2, lc3 = st.columns([3, 3, 1])
-                    with lc1:
-                        components.html(
-                            f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
-                            f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:13px;font-weight:500;">✉ {html_mod.escape(lnk["business"])}</a>',
-                            height=28,
-                        )
+                elif i in st.session_state.get("bulk_opened", set()):
+                    lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
+                    lc1.markdown(f'<span style="font-size:13px;color:#f59e0b;font-weight:500;">📨 {html_mod.escape(lnk["business"])}</span>', unsafe_allow_html=True)
                     lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                    if lc4.button("🚫", key=f"bdne_{i}", help="Do not email — move to Lost"):
+                        save_lead(lnk["lead_id"], {"stage": "Lost", "notes": "Do not email"})
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
                     if lc3.button("Sent ✓", key=f"bsent_{i}"):
                         tracker = load_send_counts()
                         log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
@@ -1530,35 +1582,81 @@ with tab_bulk:
                         save_lead(lnk["lead_id"], updates)
                         tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                         save_send_counts(tracker)
-                        st.session_state["bulk_sent"].add(i)
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
+                else:
+                    lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
+                    with lc1:
+                        components.html(
+                            f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
+                            f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:13px;font-weight:500;">✉ {html_mod.escape(lnk["business"])}</a>',
+                            height=28,
+                        )
+                    lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                    if lc4.button("🚫", key=f"bdne_{i}", help="Do not email — move to Lost"):
+                        save_lead(lnk["lead_id"], {"stage": "Lost", "notes": "Do not email"})
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
+                    if lc3.button("Sent ✓", key=f"bsent_{i}"):
+                        tracker = load_send_counts()
+                        log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                        lead_row = df[df["id"] == str(lnk["lead_id"])]
+                        updates = {"last_touch": date.today().isoformat()}
+                        if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                            updates["stage"] = "Contacted"
+                        save_lead(lnk["lead_id"], updates)
+                        tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                        save_send_counts(tracker)
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
                         st.rerun()
 
             st.divider()
             unsent_links = [links[i]["link"] for i in unsent]
-            if unsent_links:
-                js_links = json.dumps(unsent_links)
-                import streamlit.components.v1 as comp2
-                comp2.html(
-                    f'''<button onclick="openAll()" style="background:linear-gradient(135deg,#7c3aed,#a78bfa);color:white;border:none;padding:12px 28px;
-                    border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;font-family:Inter,sans-serif;box-shadow:0 2px 8px rgba(124,58,237,0.3);transition:all 0.15s;"
-                    onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 12px rgba(124,58,237,0.4)'"
-                    onmouseout="this.style.transform='none';this.style.boxShadow='0 2px 8px rgba(124,58,237,0.3)'"
-                    >Open all {len(unsent_links)} in new tabs</button>
-                    <script>
-                    function openAll() {{
-                        var links = {js_links};
-                        links.forEach(function(url) {{ window.open(url, '_blank'); }});
-                    }}
-                    </script>''',
-                    height=50,
-                )
+            BATCH_SIZE = 10
+            opened_set = st.session_state.get("bulk_opened", set())
+            # Unopened and unsent
+            unopened = [i for i in unsent if i not in opened_set]
+            if unopened:
+                # Group by sender
+                sender_groups = {}
+                for idx in unopened:
+                    lnk = links[idx]
+                    sender_groups.setdefault(lnk["sender"], []).append(idx)
+
+                for sender_email, sender_idxs in sender_groups.items():
+                    open_count = min(BATCH_SIZE, len(sender_idxs))
+                    profile_dir = SENDER_PROFILE.get(sender_email, "Profile 5")
+                    if st.button(f"Open next {open_count} for {sender_email} ({len(sender_idxs)} remaining)", type="primary", key=f"b_open_{sender_email}"):
+                        import subprocess, time
+                        batch_to_open = sender_idxs[:BATCH_SIZE]
+                        for idx in batch_to_open:
+                            subprocess.Popen([
+                                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                                f"--profile-directory={profile_dir}", links[idx]["link"]
+                            ])
+                            time.sleep(0.5)
+                        st.session_state["bulk_opened"].update(batch_to_open)
+                        st.rerun()
 
             cc1, cc2, cc3, cc4 = st.columns(4)
-            if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
+            if cc4.button("🔍 Check Gmail sent (joseph)", key="b_check_sent", help="Only checks joseph.allison@ sent folder"):
                 try:
                     from gmail_auth import check_sent_emails
-                    unsent_emails = [links[i]["email"] for i in unsent]
-                    found = check_sent_emails(unsent_emails, hours_back=24)
+                    # Only check emails assigned to joseph's sender
+                    joseph_unsent = [links[i]["email"] for i in unsent if links[i]["sender"] == "joseph.allison@yetipay.me"]
+                    other_count = len(unsent) - len(joseph_unsent)
+                    if other_count:
+                        st.warning(f"{other_count} emails from other senders — use Sent ✓ button for those.")
+                    found = check_sent_emails(joseph_unsent, hours_back=24) if joseph_unsent else set()
                     tracker = load_send_counts()
                     newly_confirmed = 0
                     for i, lnk in enumerate(links):
@@ -1591,11 +1689,13 @@ with tab_bulk:
                 save_send_counts(tracker)
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.success(f"Logged {len(links)} emails as sent.")
                 st.rerun()
             if cc2.button("❌ Cancel remaining", key="b_cancel"):
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.session_state["bulk_skip_offset"] = 0
                 st.info("Cancelled remaining. Already-confirmed sends kept.")
                 st.rerun()
@@ -1603,6 +1703,7 @@ with tab_bulk:
                 st.session_state["bulk_skip_offset"] = st.session_state.get("bulk_skip_offset", 0) + limit
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.rerun()
 
 
