@@ -3094,6 +3094,13 @@ if _active_page == "sequences":
                 tracker = load_send_counts()
                 sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
 
+                # Build a set of already-emailed lead IDs (avoid emailing same lead twice via activity_log)
+                _act = load_activity()
+                _already_emailed_ids = set()
+                if not _act.empty and "type" in _act.columns and "lead_id" in _act.columns:
+                    _email_acts = _act[_act["type"] == "email"]
+                    _already_emailed_ids = set(str(x) for x in _email_acts["lead_id"].unique())
+
                 links = []
                 call_tasks = []
                 for _, task in today_q.iterrows():
@@ -3103,10 +3110,17 @@ if _active_page == "sequences":
                     step = steps[step_idx] if step_idx < len(steps) else {}
                     channel = step.get("channel", "?")
                     tmpl_name = step.get("template")
-                    lead_row = df[df["id"] == task["lead_id"]]
+                    # Force string comparison — sequence_queue stores int, df stores str
+                    _task_lid = str(task["lead_id"])
+                    lead_row = df[df["id"].astype(str) == _task_lid]
                     if lead_row.empty:
                         continue
                     lead = lead_row.iloc[0].to_dict()
+                    # Skip if already emailed this lead (prevents duplicate sends)
+                    if channel == "email" and _task_lid in _already_emailed_ids:
+                        # Auto-mark this step as done since email already went out
+                        sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(task["lead_id"])).eq("sequence_name", task["sequence_name"]).eq("step", step_idx).execute()
+                        continue
 
                     if channel == "email" and tmpl_name and tmpl_name in templates and lead.get("email"):
                         sender = None
@@ -3432,9 +3446,16 @@ if _active_page == "sequences":
         if e_import != "All imports":
             pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
-        already = set(seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
-        pool = pool[~pool["id"].isin(already)]
-        st.caption(f"{len(pool)} eligible leads (not already enrolled)")
+        # Force string comparison (sequence_queue stores int)
+        already = set(str(x) for x in seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
+        # Also exclude leads who already have an email logged in activity_log (avoid re-emailing)
+        _act_check = load_activity()
+        _already_emailed_pool = set()
+        if not _act_check.empty and "type" in _act_check.columns and "lead_id" in _act_check.columns:
+            _already_emailed_pool = set(str(x) for x in _act_check[_act_check["type"] == "email"]["lead_id"].unique())
+        excluded = already | _already_emailed_pool
+        pool = pool[~pool["id"].astype(str).isin(excluded)]
+        st.caption(f"{len(pool)} eligible leads (not already enrolled or emailed)")
 
         if len(pool) == 0:
             st.warning("No eligible leads match these filters.")
