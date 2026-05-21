@@ -1983,13 +1983,24 @@ if _active_page == "pipeline":
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    # Compact button row: open + move arrows
-                    bc1, bc2, bc3 = st.columns([2, 1, 1])
+                    # Compact button row: open + move arrows + delete
+                    bc1, bc2, bc3, bc4 = st.columns([2, 1, 1, 0.6])
                     bc1.button("Open", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
                     if stage_idx > 0:
                         bc2.button("◀", key=f"mvl_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx - 1]), use_container_width=True)
                     if stage_idx < len(active_stages) - 1:
                         bc3.button("▶", key=f"mvr_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx + 1]), use_container_width=True)
+                    if bc4.button("🗑", key=f"del_{row['id']}", use_container_width=True):
+                        st.session_state[f"confirm_del_{row['id']}"] = True
+                    if st.session_state.get(f"confirm_del_{row['id']}"):
+                        dc1, dc2 = st.columns(2)
+                        if dc1.button("Yes delete", key=f"ydel_{row['id']}", type="primary", use_container_width=True):
+                            sb.table("leads").delete().eq("id", row["id"]).execute()
+                            st.session_state.pop(f"confirm_del_{row['id']}", None)
+                            st.rerun()
+                        if dc2.button("Cancel", key=f"cdel_{row['id']}", use_container_width=True):
+                            st.session_state.pop(f"confirm_del_{row['id']}", None)
+                            st.rerun()
 
             remaining = len(stage_df) - show_count
             if remaining > 0:
