@@ -3568,16 +3568,43 @@ if _active_page == "sequences":
 
                     cc1, cc2, cc3, cc4 = st.columns(4)
                     if cc3.button("🧪 Test Gmail connection", key="seq_b_test_gmail"):
+                        # Detailed diagnostic
+                        _diag = []
+                        _diag.append(f"**Secrets check:**")
+                        try:
+                            _has_secret = bool(st.secrets.get("gmail_token", ""))
+                            _diag.append(f"- `gmail_token` in st.secrets: {_has_secret}")
+                            if _has_secret:
+                                _tok = st.secrets["gmail_token"]
+                                _diag.append(f"- Type: {type(_tok).__name__}")
+                                _diag.append(f"- Length: {len(str(_tok))} chars")
+                                _diag.append(f"- Starts with: `{str(_tok)[:40]}...`")
+                                # Try parsing
+                                try:
+                                    if isinstance(_tok, str):
+                                        _parsed = json.loads(_tok)
+                                    else:
+                                        _parsed = dict(_tok)
+                                    _diag.append(f"- Parsed keys: {list(_parsed.keys())}")
+                                except Exception as e:
+                                    _diag.append(f"- ❌ Parse error: {e}")
+                        except Exception as e:
+                            _diag.append(f"- ❌ st.secrets error: {e}")
+                        _diag.append(f"**Token file:**")
+                        from pathlib import Path as _P
+                        _tf = _P(__file__).parent / "gmail_token.json"
+                        _diag.append(f"- File exists: {_tf.exists()}")
+
                         try:
                             from gmail_auth import get_gmail_service
                             svc = get_gmail_service()
                             if svc is None:
-                                st.error("Gmail service returned None. Token not loaded. Check Streamlit secrets has `gmail_token = '<JSON string>'`")
+                                st.error("Gmail service returned None.\n\n" + "\n".join(_diag))
                             else:
                                 profile = svc.users().getProfile(userId="me").execute()
                                 st.success(f"✅ Connected as: {profile['emailAddress']}. Messages total: {profile.get('messagesTotal')}")
                         except Exception as e:
-                            st.error(f"Gmail connection failed: {e}")
+                            st.error(f"Gmail connection failed: {e}\n\n" + "\n".join(_diag))
                     if cc4.button("🔍 Check Gmail sent", key="seq_b_check_sent"):
                         try:
                             from gmail_auth import check_sent_emails
