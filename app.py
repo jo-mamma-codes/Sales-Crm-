@@ -3360,44 +3360,59 @@ if _active_page == "import":
             if not up_name.strip():
                 st.error("Import name required — needed to target these leads in sequences.")
             elif up_mode.startswith("Update"):
-                # UPDATE mode — find existing leads by business_name and merge missing fields
+                # UPDATE mode — match on existing df in-memory, batch updates to Supabase
                 up.seek(0)
                 tmp_df_up = pd.read_csv(up, dtype=str).fillna("")
-                updated = 0
-                inserted = 0
-                progress = st.progress(0, text="Updating leads...")
-                for i, (_, r) in enumerate(tmp_df_up.iterrows()):
+                progress = st.progress(0, text="Matching leads...")
+
+                # Build lookup map: lowercase business_name → list of existing rows (id, email, phone, etc.)
+                df_lookup = {}
+                for _, row in df.iterrows():
+                    key = str(row.get("business_name", "")).strip().lower()
+                    if key:
+                        df_lookup.setdefault(key, []).append({
+                            "id": row["id"],
+                            "email": row.get("email"),
+                            "phone": row.get("phone"),
+                            "contact_name": row.get("contact_name"),
+                            "region": row.get("region"),
+                            "category": row.get("category"),
+                        })
+
+                updates_to_apply = []  # list of (lead_id, updates_dict)
+                inserts_to_apply = []
+                nid_start = int(next_id(df)) if not df.empty else 1
+
+                progress.progress(20, text="Processing CSV rows...")
+                for _, r in tmp_df_up.iterrows():
                     biz = r.get("business_name", "").strip()
                     if not biz:
                         continue
-                    existing = sb.table("leads").select("id, email, phone, contact_name, region, category").ilike("business_name", biz).execute()
-                    updates = {}
                     contact = f"{r.get('first_name','')} {r.get('last_name','')}".strip()
                     new_email = r.get("email", "").strip()
                     new_phone = r.get("phone", "").strip()
                     new_region = r.get("region", "").strip()
                     new_cat = r.get("category", "").strip()
-                    if existing.data:
-                        for row in existing.data:
-                            updates = {}
-                            if new_email and (not row.get("email") or "@" not in (row.get("email") or "")):
-                                updates["email"] = new_email
+
+                    matches = df_lookup.get(biz.lower(), [])
+                    if matches:
+                        for row in matches:
+                            u = {}
+                            cur_email = row.get("email") or ""
+                            if new_email and (not cur_email or "@" not in cur_email):
+                                u["email"] = new_email
                             if new_phone and not row.get("phone"):
-                                updates["phone"] = new_phone
+                                u["phone"] = new_phone
                             if contact and not row.get("contact_name"):
-                                updates["contact_name"] = contact
+                                u["contact_name"] = contact
                             if new_region and not row.get("region"):
-                                updates["region"] = new_region
+                                u["region"] = new_region
                             if new_cat and not row.get("category"):
-                                updates["category"] = new_cat
-                            if updates:
-                                sb.table("leads").update(updates).eq("id", row["id"]).execute()
-                                updated += 1
+                                u["category"] = new_cat
+                            if u:
+                                updates_to_apply.append((int(row["id"]), u))
                     else:
-                        # New lead — insert
-                        new_id = int(next_id(df)) + inserted
-                        sb.table("leads").insert({
-                            "id": new_id,
+                        inserts_to_apply.append({
                             "business_name": biz,
                             "contact_name": contact or None,
                             "phone": new_phone or None,
@@ -3409,14 +3424,28 @@ if _active_page == "import":
                             "created": date.today().isoformat(),
                             "pipeline": up_pipeline,
                             "deal_value": 0,
-                        }).execute()
-                        inserted += 1
-                    if i % 50 == 0:
-                        progress.progress(min(99, int(i / len(tmp_df_up) * 100)), text=f"Processed {i}/{len(tmp_df_up)}...")
+                        })
+
+                # Apply updates
+                total_ops = len(updates_to_apply) + len(inserts_to_apply)
+                progress.progress(40, text=f"Applying {len(updates_to_apply)} updates, {len(inserts_to_apply)} inserts...")
+                for i, (lid, u) in enumerate(updates_to_apply):
+                    sb.table("leads").update(u).eq("id", lid).execute()
+                    if i % 25 == 0:
+                        progress.progress(min(95, 40 + int(i / max(total_ops, 1) * 50)), text=f"Updated {i}/{len(updates_to_apply)}...")
+
+                # Apply inserts in batch
+                if inserts_to_apply:
+                    for i, ins in enumerate(inserts_to_apply):
+                        ins["id"] = nid_start + i
+                    batch_size = 500
+                    for i in range(0, len(inserts_to_apply), batch_size):
+                        sb.table("leads").insert(inserts_to_apply[i:i+batch_size]).execute()
+
                 progress.progress(100, text="Done!")
                 load_crm.clear()
                 st.session_state.pop("_df_cache", None)
-                st.success(f"✅ Updated {updated} existing leads, inserted {inserted} new leads")
+                st.success(f"✅ Updated {len(updates_to_apply)} existing leads, inserted {len(inserts_to_apply)} new leads")
                 st.rerun()
             else:
                 tmp = ROOT / "_upload.csv"
