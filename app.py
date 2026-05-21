@@ -3042,7 +3042,7 @@ if _active_page == "sequences":
     templates = load_templates()
     seq_q = load_seq_queue()
 
-    seq_sub = st.radio("", ["Today's tasks", "Enroll leads", "Manage sequences"], horizontal=True, key="seq_sub")
+    seq_sub = st.radio("", ["Today's tasks", "Enroll leads", "Enrolled leads", "Manage sequences"], horizontal=True, key="seq_sub")
 
     if seq_sub == "Today's tasks":
         st.subheader("Sequence tasks due today")
@@ -3540,6 +3540,59 @@ if _active_page == "sequences":
                 except Exception as e:
                     st.session_state["_last_enroll_msg"] = f"❌ Enroll failed: {e}"
                 st.rerun()
+
+    elif seq_sub == "Enrolled leads":
+        st.subheader("Leads enrolled in sequences")
+        if seq_q.empty:
+            st.info("No leads enrolled in any sequence.")
+        else:
+            # Filters
+            ef1, ef2 = st.columns([2, 2])
+            seq_filter = ef1.selectbox("Sequence", ["All"] + list(seq_q["sequence_name"].unique()), key="enrolled_seq_f")
+            status_filter = ef2.selectbox("Status", ["All", "pending", "done", "skipped"], key="enrolled_status_f")
+
+            view = seq_q.copy()
+            if seq_filter != "All":
+                view = view[view["sequence_name"] == seq_filter]
+            if status_filter != "All":
+                view = view[view["status"] == status_filter]
+
+            # Summary
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Total enrolled", view["lead_id"].nunique())
+            sc2.metric("Pending steps", len(view[view["status"] == "pending"]))
+            sc3.metric("Sent (done)", len(view[view["status"] == "done"]))
+            sc4.metric("Skipped", len(view[view["status"] == "skipped"]))
+
+            # Build display dataframe — one row per (lead, sequence) with step progress
+            display_rows = []
+            for (lid, sn), group in view.groupby(["lead_id", "sequence_name"]):
+                total_steps = len(group)
+                done_steps = len(group[group["status"] == "done"])
+                pending = group[group["status"] == "pending"]
+                next_due = pending["due_date"].min() if not pending.empty else "—"
+                next_step = pending["step"].min() + 1 if not pending.empty else "—"
+                biz = group["business_name"].iloc[0]
+                lead_row = df[df["id"].astype(str) == str(lid)]
+                email_addr = lead_row.iloc[0]["email"] if not lead_row.empty else ""
+                stage = lead_row.iloc[0]["stage"] if not lead_row.empty else ""
+                display_rows.append({
+                    "Lead ID": str(lid),
+                    "Business": biz,
+                    "Email": email_addr,
+                    "Stage": stage,
+                    "Sequence": sn,
+                    "Progress": f"{done_steps}/{total_steps}",
+                    "Next step": next_step,
+                    "Next due": next_due,
+                })
+
+            if display_rows:
+                display_df = pd.DataFrame(display_rows)
+                st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
+                st.caption(f"Showing {len(display_df)} enrollments. Click column headers to sort.")
+            else:
+                st.info("No enrollments match filters.")
 
     elif seq_sub == "Manage sequences":
         st.subheader("Create / edit sequences")
