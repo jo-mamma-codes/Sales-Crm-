@@ -756,24 +756,33 @@ def next_id(df):
 
 def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales", default_stage="New", import_name=None):
     if not src_path.exists():
-        return df, 0
+        return df, 0, {"total": 0, "skipped_generic_email": 0, "skipped_no_email": 0, "skipped_blocked": 0, "skipped_existing": 0, "inserted": 0}
     src = pd.read_csv(src_path, dtype=str).fillna("")
+    stats = {"total": len(src), "skipped_generic_email": 0, "skipped_no_email": 0, "skipped_blocked": 0, "skipped_existing": 0, "inserted": 0}
     if region_filter and region_filter != "All":
         src = src[src["region"].str.contains(region_filter, case=False, na=False)]
     # only personal emails — drop generic inboxes
     generic = ("info@", "hello@", "contact@", "enquiries@", "admin@", "sales@", "office@", "reception@", "bookings@")
     if "email" in src.columns:
+        before = len(src)
         src = src[~src["email"].str.lower().str.startswith(generic)]
+        stats["skipped_generic_email"] = before - len(src)
+        before = len(src)
         src = src[src["email"].str.contains("@", na=False)]
+        stats["skipped_no_email"] = before - len(src)
     # block bounced + GDPR never-contact emails
     blocked_file = ROOT / "bounced_emails.json"
     if blocked_file.exists():
         blocked = json.loads(blocked_file.read_text())
         blocked_emails = set(e.lower() for e in blocked.get("bounced", []) + blocked.get("never_contact", []))
         if "email" in src.columns:
+            before = len(src)
             src = src[~src["email"].str.lower().isin(blocked_emails)]
+            stats["skipped_blocked"] = before - len(src)
     existing = set(df["business_name"].str.lower()) if not df.empty else set()
+    before = len(src)
     src = src[~src["business_name"].str.lower().isin(existing)]
+    stats["skipped_existing"] = before - len(src)
     if limit:
         src = src.head(limit)
     rows = []
@@ -799,6 +808,7 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
             "deal_value": 0,
         })
         nid += 1
+    stats["inserted"] = len(rows)
     if rows:
         batch_size = 500
         for i in range(0, len(rows), batch_size):
@@ -806,7 +816,7 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
         load_crm.clear()
         st.session_state.pop("_df_cache", None)
         df = load_crm()
-    return df, len(rows)
+    return df, len(rows), stats
 
 
 # ─── CSS ─────────────────────────────────────────────────────────────────────
@@ -3333,9 +3343,10 @@ if _active_page == "import":
         if st.button("Import", type="primary"):
             progress = st.progress(0, text="Importing leads...")
             progress.progress(10, text="Reading source file...")
-            df, added = import_leads(df, LEADS_SRC, rf, lim)
+            df, added, stats = import_leads(df, LEADS_SRC, rf, lim)
             progress.progress(100, text="Done!")
             st.success(f"✅ Imported {added} new leads")
+            st.info(f"📊 CSV had {stats['total']} rows: **{stats['inserted']} new** · {stats['skipped_existing']} already exist · {stats['skipped_generic_email']} generic emails · {stats['skipped_no_email']} no email · {stats['skipped_blocked']} bounced/blocked")
             st.rerun()
     else:
         st.error("Source CSV not found")
@@ -3446,19 +3457,22 @@ if _active_page == "import":
                 progress.progress(100, text="Done!")
                 load_crm.clear()
                 st.session_state.pop("_df_cache", None)
-                st.success(f"✅ Updated {len(updates_to_apply)} existing leads, inserted {len(inserts_to_apply)} new leads")
+                _matched_no_change = sum(1 for biz in tmp_df_up["business_name"].str.strip().str.lower().unique() if biz in df_lookup) - len(set(lid for lid, _ in updates_to_apply))
+                st.success(f"✅ Import complete")
+                st.info(f"📊 CSV had {len(tmp_df_up)} rows: **{len(updates_to_apply)} existing leads updated** · **{len(inserts_to_apply)} new leads inserted** · {max(_matched_no_change, 0)} matched but nothing to update")
                 st.rerun()
             else:
                 tmp = ROOT / "_upload.csv"
                 tmp.write_bytes(up.getvalue())
                 progress = st.progress(0, text="Importing leads...")
                 progress.progress(10, text="Reading CSV...")
-                df, added = import_leads(df, tmp, None, None, pipeline=up_pipeline,
+                df, added, stats = import_leads(df, tmp, None, None, pipeline=up_pipeline,
                                           default_stage=up_stage, import_name=up_name.strip())
                 progress.progress(90, text=f"Imported {added} leads...")
                 tmp.unlink()
                 progress.progress(100, text="Done!")
                 st.success(f"✅ Imported {added} new leads tagged '{up_name.strip()}' to {up_pipeline} pipeline")
+                st.info(f"📊 CSV had {stats['total']} rows: **{stats['inserted']} new inserted** · {stats['skipped_existing']} already exist (skipped) · {stats['skipped_generic_email']} generic emails skipped · {stats['skipped_no_email']} no email skipped · {stats['skipped_blocked']} bounced/blocked skipped")
                 st.balloons()
                 st.rerun()
 
