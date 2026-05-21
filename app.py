@@ -2035,7 +2035,7 @@ if _active_page == "pipeline":
 
     def _move_and_rerun(lid, new_stage):
         move_lead(lid, new_stage)
-        st.rerun()
+        # no st.rerun() — on_click callbacks trigger rerun automatically
 
     cols = st.columns(len(active_stages))
     for i, stage in enumerate(active_stages):
