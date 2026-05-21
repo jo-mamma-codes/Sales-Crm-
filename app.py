@@ -460,16 +460,25 @@ def load_sequences():
 
 
 def save_sequences(s):
-    """Save to both Supabase (persistent) and local file (fast read)."""
+    """Save to Supabase (persistent) and local file (cache). Surfaces errors visibly."""
+    _supabase_ok = False
     try:
         sb.table("app_config").upsert({"key": "sequences", "value": json.dumps(s)}).execute()
+        _supabase_ok = True
     except Exception as e:
-        # Table might not exist yet — keep working from file
-        print(f"Could not save sequences to Supabase: {e}")
+        try:
+            st.error(f"❌ Could not persist sequences to Supabase: {e}\n\nRun this in Supabase SQL Editor:\n```sql\nALTER TABLE app_config DISABLE ROW LEVEL SECURITY;\n```")
+        except Exception:
+            print(f"Could not save sequences to Supabase: {e}")
     try:
         SEQUENCES.write_text(json.dumps(s, indent=2))
     except Exception:
         pass
+    if not _supabase_ok:
+        try:
+            st.warning("⚠️ Sequence saved locally only — will be lost on next redeploy. Fix Supabase write (RLS) to persist.")
+        except Exception:
+            pass
 
 
 def load_seq_queue():
