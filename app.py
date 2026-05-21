@@ -3070,6 +3070,12 @@ if _active_page == "sequences":
 
     elif seq_sub == "Enroll leads":
         st.subheader("Enroll leads into sequence")
+        # Show last enroll result if any
+        if st.session_state.get("_last_enroll_msg"):
+            st.success(st.session_state["_last_enroll_msg"])
+            if st.button("Dismiss", key="dismiss_enroll_msg"):
+                del st.session_state["_last_enroll_msg"]
+                st.rerun()
         seq_name = st.selectbox("Sequence", list(sequences.keys()), key="seq_enroll_name")
         seq_def = sequences[seq_name]
         st.caption("Steps: " + " → ".join(
@@ -3138,11 +3144,41 @@ if _active_page == "sequences":
                     st.markdown("---")
 
             if st.button(f"Enroll {e_limit} leads into '{seq_name}'", type="primary", key="seq_e_go"):
-                enrolled = 0
-                for _, row in pool.head(e_limit).iterrows():
-                    enroll_lead(row["id"], row["business_name"], seq_name, sequences)
-                    enrolled += 1
-                st.success(f"Enrolled {enrolled} leads into '{seq_name}'")
+                progress = st.progress(0, text=f"Enrolling {e_limit} leads...")
+                seq = sequences[seq_name]
+                lead_ids = pool.head(e_limit)[["id", "business_name"]].values.tolist()
+
+                # Batch delete any existing enrollments for these leads
+                try:
+                    for lid, _ in lead_ids:
+                        sb.table("sequence_queue").delete().eq("lead_id", int(lid)).eq("sequence_name", seq_name).execute()
+                except Exception as e:
+                    st.error(f"Delete failed: {e}")
+                progress.progress(30, text="Building queue...")
+
+                # Build all rows then batch insert
+                queue_rows = []
+                for lid, biz in lead_ids:
+                    for i, step in enumerate(seq["steps"]):
+                        due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                        queue_rows.append({
+                            "lead_id": int(lid),
+                            "business_name": biz,
+                            "sequence_name": seq_name,
+                            "step": i,
+                            "due_date": due,
+                            "status": "pending",
+                        })
+                progress.progress(60, text=f"Inserting {len(queue_rows)} queue items...")
+                try:
+                    if queue_rows:
+                        batch_size = 500
+                        for i in range(0, len(queue_rows), batch_size):
+                            sb.table("sequence_queue").insert(queue_rows[i:i+batch_size]).execute()
+                    progress.progress(100, text="Done!")
+                    st.session_state["_last_enroll_msg"] = f"✅ Enrolled **{len(lead_ids)} leads** into '{seq_name}' — {len(queue_rows)} tasks queued ({len(seq['steps'])} steps × {len(lead_ids)} leads)"
+                except Exception as e:
+                    st.session_state["_last_enroll_msg"] = f"❌ Enroll failed: {e}"
                 st.rerun()
 
     elif seq_sub == "Manage sequences":
