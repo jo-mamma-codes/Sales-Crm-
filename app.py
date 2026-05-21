@@ -1055,24 +1055,9 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
     display: inline-block; background: #f1f0ff; color: #7c3aed;
     font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
 }
-/* Deal name button — looks like plain clickable text */
-[data-testid="stContainer"] .stButton > button {
-    background: transparent !important; border: none !important; box-shadow: none !important;
-    color: #1a1a2e !important; font-weight: 700 !important; font-size: 14px !important;
-    text-align: left !important; padding: 0 !important; margin: 0 !important;
-    line-height: 1.3 !important; cursor: pointer !important;
-    min-height: 0 !important; height: auto !important;
-    border-radius: 0 !important; width: auto !important;
-}
-[data-testid="stContainer"] .stButton > button:hover {
-    color: #7c3aed !important; background: transparent !important;
-    text-decoration: underline !important;
-}
-[data-testid="stContainer"] .stButton > button:focus {
-    box-shadow: none !important; outline: none !important;
-}
-[data-testid="stContainer"] .stButton {
-    margin: 0 !important; padding: 0 !important;
+/* Kanban card arrow buttons — compact */
+[data-testid="stContainer"] [data-testid="stColumns"] .stButton > button {
+    min-height: 28px !important; padding: 2px 8px !important; font-size: 12px !important;
 }
 /* Sidebar card link buttons */
 .profile-sidebar-card + div .stButton > button {
@@ -1214,13 +1199,6 @@ section[data-testid="stSidebar"] .stRadio > div > label:has(input:checked) {
     background: linear-gradient(135deg, #6d28d9, #5b21b6) !important;
     box-shadow: 0 4px 12px rgba(124,58,237,0.35) !important;
 }
-/* Card buttons stay compact */
-[data-testid="stContainer"] .stButton > button {
-    padding: 2px 8px !important; font-size: 10px !important;
-    height: 24px !important; min-height: 0 !important;
-    font-weight: 500 !important; box-shadow: none !important;
-}
-
 /* ── INPUTS - compact ── */
 input, textarea, select, [data-testid="stTextInput"] input,
 [data-testid="stTextArea"] textarea {
@@ -2066,11 +2044,11 @@ if _active_page == "pipeline":
 
                 with st.container(border=True):
                     st.markdown(
-                        f'<style>[data-testid="stContainer"]:has(#c{row["id"]}){{background:{s_bg}!important;border-left:3px solid {s_border}!important;padding:6px 8px 2px!important;margin-bottom:4px!important;cursor:pointer;}}</style>'
+                        f'<style>[data-testid="stContainer"]:has(#c{row["id"]}){{background:{s_bg}!important;border-left:3px solid {s_border}!important;padding:6px 8px 2px!important;margin-bottom:4px!important;}}</style>'
                         f'<span id="c{row["id"]}" style="display:none"></span>',
                         unsafe_allow_html=True,
                     )
-                    # Business name IS the button
+                    # Business name IS the button (styled as plain text via .deal-name-btn + div CSS)
                     st.button(row["business_name"][:36], key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
                     st.markdown(
                         f'<div style="font-size:10px;color:#64748b;margin:-8px 0 2px;">{esc(row["contact_name"])} {score_html} {stale} {deal_html}</div>'
