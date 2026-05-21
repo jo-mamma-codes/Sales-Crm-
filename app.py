@@ -3212,17 +3212,15 @@ if _active_page == "sequences":
                     except Exception:
                         pass
 
-                # Build a set of recently-emailed lead IDs (last 7 days) to skip dupes
-                _act = load_activity()
+                # NOTE: Removed automatic activity_log-based skip.
+                # sequence_queue.status='pending' filter + idempotent send guard prevent dupes already.
+                # Auto-skipping based on any prior email was hiding 50+ legitimate tasks.
                 _already_emailed_ids = set()
-                if not _act.empty and "type" in _act.columns and "lead_id" in _act.columns:
-                    _email_acts = _act[_act["type"] == "email"].copy()
-                    if "date" in _email_acts.columns:
-                        _email_acts["date"] = pd.to_datetime(_email_acts["date"], errors="coerce")
-                        _cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
-                        _email_acts = _email_acts[_email_acts["date"] >= _cutoff]
-                    _already_emailed_ids = set(str(x) for x in _email_acts["lead_id"].unique())
 
+                _skipped_dnc = 0
+                _skipped_no_sender = 0
+                _skipped_no_email = 0
+                _skipped_no_lead = 0
                 links = []
                 call_tasks = []
                 for _, task in today_q.iterrows():
@@ -3232,22 +3230,21 @@ if _active_page == "sequences":
                     step = steps[step_idx] if step_idx < len(steps) else {}
                     channel = step.get("channel", "?")
                     tmpl_name = step.get("template")
-                    # Force string comparison — sequence_queue stores int, df stores str
                     _task_lid = str(task["lead_id"])
                     lead_row = df[df["id"].astype(str) == _task_lid]
                     if lead_row.empty:
+                        _skipped_no_lead += 1
                         continue
                     lead = lead_row.iloc[0].to_dict()
-                    # Skip if already emailed this lead (prevents duplicate sends)
-                    if channel == "email" and _task_lid in _already_emailed_ids:
-                        # Auto-mark this step as done since email already went out
-                        sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(task["lead_id"])).eq("sequence_name", task["sequence_name"]).eq("step", step_idx).execute()
-                        continue
 
-                    if channel == "email" and tmpl_name and tmpl_name in templates and lead.get("email"):
+                    if channel == "email" and tmpl_name and tmpl_name in templates:
+                        if not lead.get("email"):
+                            _skipped_no_email += 1
+                            continue
                         # Skip DNC emails (bounced/unsubscribed) — auto-mark task done so it doesn't reappear
                         if lead["email"].lower() in _dnc_emails_t:
                             sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(task["lead_id"])).eq("sequence_name", task["sequence_name"]).eq("step", step_idx).execute()
+                            _skipped_dnc += 1
                             continue
                         sender = None
                         for s in SENDERS:
@@ -3255,6 +3252,7 @@ if _active_page == "sequences":
                                 sender = s
                                 break
                         if not sender:
+                            _skipped_no_sender += 1
                             continue
                         subj, body = render_template(templates[tmpl_name], lead, sender_email=sender["email"])
                         links.append({
@@ -3270,6 +3268,18 @@ if _active_page == "sequences":
                             "lead_id": task["lead_id"], "business": task["business_name"],
                             "phone": lead.get("phone", ""), "sequence_name": task["sequence_name"], "step": step_idx,
                         })
+
+                # Diagnostic: show why tasks didn't make it to the link list
+                _total_due = len(today_q)
+                _total_shown = len(links) + len(call_tasks)
+                if _total_shown < _total_due:
+                    _diag_parts = []
+                    if _skipped_dnc: _diag_parts.append(f"{_skipped_dnc} on DNC list (auto-skipped)")
+                    if _skipped_no_email: _diag_parts.append(f"{_skipped_no_email} have no email")
+                    if _skipped_no_sender: _diag_parts.append(f"{_skipped_no_sender} no sender capacity left today")
+                    if _skipped_no_lead: _diag_parts.append(f"{_skipped_no_lead} lead record missing")
+                    if _diag_parts:
+                        st.warning(f"⚠️ {_total_due - _total_shown} of {_total_due} tasks not shown: " + " · ".join(_diag_parts))
 
                 # ─── Sender rotation summary (same as Outreach) ───
                 remaining_today = sum(s["daily_cap"] - tracker["counts"].get(s["email"], 0) for s in SENDERS)
