@@ -3354,9 +3354,69 @@ if _active_page == "import":
         uc1, uc2 = st.columns(2)
         up_pipeline = uc1.selectbox("Import to pipeline", list(PIPELINES.keys()), key="up_pipeline")
         up_stage = uc2.selectbox("Default stage", PIPELINES[up_pipeline], key="up_stage")
+        up_mode = st.radio("Mode", ["New leads only (skip existing)", "Update existing leads (merge missing fields)"],
+                           key="up_mode", horizontal=True)
         if st.button("Import uploaded", type="primary"):
             if not up_name.strip():
                 st.error("Import name required — needed to target these leads in sequences.")
+            elif up_mode.startswith("Update"):
+                # UPDATE mode — find existing leads by business_name and merge missing fields
+                tmp_df_up = pd.read_csv(up, dtype=str).fillna("")
+                updated = 0
+                inserted = 0
+                progress = st.progress(0, text="Updating leads...")
+                for i, (_, r) in enumerate(tmp_df_up.iterrows()):
+                    biz = r.get("business_name", "").strip()
+                    if not biz:
+                        continue
+                    existing = sb.table("leads").select("id, email, phone, contact_name, region, category").ilike("business_name", biz).execute()
+                    updates = {}
+                    contact = f"{r.get('first_name','')} {r.get('last_name','')}".strip()
+                    new_email = r.get("email", "").strip()
+                    new_phone = r.get("phone", "").strip()
+                    new_region = r.get("region", "").strip()
+                    new_cat = r.get("category", "").strip()
+                    if existing.data:
+                        for row in existing.data:
+                            updates = {}
+                            if new_email and (not row.get("email") or "@" not in (row.get("email") or "")):
+                                updates["email"] = new_email
+                            if new_phone and not row.get("phone"):
+                                updates["phone"] = new_phone
+                            if contact and not row.get("contact_name"):
+                                updates["contact_name"] = contact
+                            if new_region and not row.get("region"):
+                                updates["region"] = new_region
+                            if new_cat and not row.get("category"):
+                                updates["category"] = new_cat
+                            if updates:
+                                sb.table("leads").update(updates).eq("id", row["id"]).execute()
+                                updated += 1
+                    else:
+                        # New lead — insert
+                        new_id = int(next_id(df)) + inserted
+                        sb.table("leads").insert({
+                            "id": new_id,
+                            "business_name": biz,
+                            "contact_name": contact or None,
+                            "phone": new_phone or None,
+                            "email": new_email or None,
+                            "region": new_region or None,
+                            "category": new_cat or None,
+                            "stage": up_stage,
+                            "source": up_name.strip(),
+                            "created": date.today().isoformat(),
+                            "pipeline": up_pipeline,
+                            "deal_value": 0,
+                        }).execute()
+                        inserted += 1
+                    if i % 50 == 0:
+                        progress.progress(min(99, int(i / len(tmp_df_up) * 100)), text=f"Processed {i}/{len(tmp_df_up)}...")
+                progress.progress(100, text="Done!")
+                load_crm.clear()
+                st.session_state.pop("_df_cache", None)
+                st.success(f"✅ Updated {updated} existing leads, inserted {inserted} new leads")
+                st.rerun()
             else:
                 tmp = ROOT / "_upload.csv"
                 tmp.write_bytes(up.getvalue())
