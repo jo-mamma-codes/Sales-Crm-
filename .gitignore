@@ -10,7 +10,6 @@ send_tracker.json
 gmail_cache/
 gmail_credentials.json
 gmail_token*.json
-pipelines.json
 _upload.csv
 
 # Migration (one-time)

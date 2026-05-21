@@ -1,0 +1,26 @@
+{
+  "Sales": [
+    "New",
+    "Contacted",
+    "Demo Booked",
+    "Proposal",
+    "Won",
+    "Lost"
+  ],
+  "POS Customers": [
+    "New",
+    "Messgaed",
+    "Interested",
+    "demo bookd",
+    "demo compleated",
+    "signed",
+    "Live",
+    "dead"
+  ],
+  "Referral": [
+    "New Referral",
+    "Contacted",
+    "Referral Signed Up",
+    "Reward Sent"
+  ]
+}
