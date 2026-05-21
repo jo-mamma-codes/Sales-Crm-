@@ -679,7 +679,7 @@ def save_config(cfg):
     CONFIG.write_text(json.dumps(cfg, indent=2))
 
 
-@st.cache_data(ttl=120, show_spinner="Loading leads...")
+@st.cache_data(ttl=30, show_spinner="Loading leads...")
 def load_crm():
     import time
     all_data = []
@@ -1373,7 +1373,8 @@ cfg = load_config()
 # Auto-refresh every 120s to stay in sync with DB
 import time as _time
 _cache_age = _time.time() - st.session_state.get("_df_cache_ts", 0)
-if "_df_cache" in st.session_state and _cache_age < 120:
+# 30s TTL — short enough that updates appear quickly, long enough to skip re-fetch on every interaction
+if "_df_cache" in st.session_state and _cache_age < 30:
     df = st.session_state["_df_cache"]
 else:
     df = load_crm()
