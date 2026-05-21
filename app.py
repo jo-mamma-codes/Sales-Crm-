@@ -3518,16 +3518,17 @@ if _active_page == "sequences":
                 progress = st.progress(0, text=f"Enrolling {e_limit} leads...")
                 seq = sequences[seq_name]
                 lead_ids = pool.head(e_limit)[["id", "business_name"]].values.tolist()
+                lead_id_ints = [int(lid) for lid, _ in lead_ids]
 
-                # Batch delete any existing enrollments for these leads
+                # Batch delete via in_() — one call instead of N
+                progress.progress(15, text="Clearing prior enrollments...")
                 try:
-                    for lid, _ in lead_ids:
-                        sb.table("sequence_queue").delete().eq("lead_id", int(lid)).eq("sequence_name", seq_name).execute()
+                    sb.table("sequence_queue").delete().in_("lead_id", lead_id_ints).eq("sequence_name", seq_name).execute()
                 except Exception as e:
-                    st.error(f"Delete failed: {e}")
-                progress.progress(30, text="Building queue...")
+                    st.session_state["_last_enroll_msg"] = f"❌ Delete failed: {e}"
+                    st.rerun()
 
-                # Build all rows then batch insert
+                progress.progress(40, text="Building queue...")
                 queue_rows = []
                 for lid, biz in lead_ids:
                     for i, step in enumerate(seq["steps"]):
@@ -3549,7 +3550,7 @@ if _active_page == "sequences":
                     progress.progress(100, text="Done!")
                     st.session_state["_last_enroll_msg"] = f"✅ Enrolled **{len(lead_ids)} leads** into '{seq_name}' — {len(queue_rows)} tasks queued ({len(seq['steps'])} steps × {len(lead_ids)} leads)"
                 except Exception as e:
-                    st.session_state["_last_enroll_msg"] = f"❌ Enroll failed: {e}"
+                    st.session_state["_last_enroll_msg"] = f"❌ Insert failed: {e}"
                 st.rerun()
 
     elif seq_sub == "Enrolled leads":
