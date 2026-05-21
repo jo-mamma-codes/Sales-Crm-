@@ -3052,7 +3052,8 @@ if _active_page == "sequences":
             [f"Day {s['day']}: {s['channel']}" + (f" ({s['template']})" if s.get('template') else "") for s in seq_def["steps"]]
         ))
         ec1, ec2, ec3 = st.columns(3)
-        e_stage = ec1.multiselect("Stage filter", STAGES, default=["New"], key="seq_e_stage")
+        # Stage filter: empty default = ALL stages (was filtering out Cornwall leads not in "New")
+        e_stage = ec1.multiselect("Stage filter (empty = all)", STAGES, default=[], key="seq_e_stage")
         e_region = ec2.text_input("Region filter", key="seq_e_region")
         import_options = ["All imports"] + sorted([s for s in df["source"].dropna().unique().tolist() if s])
         e_import = ec3.selectbox("Import (CSV) filter", import_options, key="seq_e_import")
@@ -3067,20 +3068,23 @@ if _active_page == "sequences":
         st.caption(f"{len(pool)} eligible leads (not already enrolled)")
 
         if len(pool) == 0:
-            st.warning("No eligible leads match these filters. Check stage filter, import filter, and that leads have email addresses.")
-            # Show diagnostic
-            with st.expander("Why 0 leads?"):
+            st.warning("No eligible leads match these filters.")
+            # Show diagnostic — auto-expanded
+            with st.expander("Why 0 leads?", expanded=True):
                 _all_sources = sorted([s for s in df["source"].dropna().unique().tolist() if s])
-                st.write(f"**Available import sources:** {_all_sources}")
+                st.write(f"**All import sources in DB:**")
+                st.write(_all_sources)
                 if e_import != "All imports":
-                    _src_count = len(df[df["source"] == e_import])
-                    st.write(f"**Leads with source='{e_import}':** {_src_count}")
-                    if _src_count > 0:
-                        _src_df = df[df["source"] == e_import]
+                    _src_df = df[df["source"] == e_import]
+                    st.write(f"**Leads with source='{e_import}':** {len(_src_df)}")
+                    if len(_src_df) > 0:
                         _stages_in_src = _src_df["stage"].value_counts().to_dict()
                         st.write(f"**Stages in this import:** {_stages_in_src}")
                         _with_email = len(_src_df[_src_df["email"].str.contains("@", na=False)])
-                        st.write(f"**With valid email:** {_with_email}")
+                        st.write(f"**With valid email (@):** {_with_email}")
+                        _not_enrolled = len(_src_df[~_src_df["id"].isin(already)])
+                        st.write(f"**Not already enrolled:** {_not_enrolled}")
+                        st.write(f"**Stage filter applied:** {e_stage if e_stage else '(none — all stages)'}")
         else:
             e_limit = st.slider("Enroll how many", 1, max(min(len(pool), 500), 2),
                                 min(50, len(pool)), key="seq_e_limit") if len(pool) > 1 else 1
