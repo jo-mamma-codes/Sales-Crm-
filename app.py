@@ -3046,6 +3046,34 @@ if _active_page == "sequences":
 
     if seq_sub == "Today's tasks":
         st.subheader("Sequence tasks due today")
+        # Auto-mark sent when user clicks a Gmail link (link's onclick sets ?seq_opened=N)
+        _qp = st.query_params
+        _opened_idx = _qp.get("seq_opened")
+        if _opened_idx is not None:
+            try:
+                _opened_i = int(_opened_idx)
+                _pending_open = st.session_state.get("_seq_pending_open", [])
+                # Use stored links list from prior render to look up which task to mark
+                _stored_links = st.session_state.get("_seq_links_cache", [])
+                if 0 <= _opened_i < len(_stored_links):
+                    _lnk = _stored_links[_opened_i]
+                    sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(_lnk["lead_id"])).eq("sequence_name", _lnk["sequence_name"]).eq("step", _lnk["step"]).execute()
+                    log_activity(_lnk["lead_id"], _lnk["business"], "email", _lnk["subject"], _lnk["body"])
+                    _lead_row = df[df["id"] == str(_lnk["lead_id"])]
+                    _updates = {"last_touch": date.today().isoformat()}
+                    if not _lead_row.empty and _lead_row.iloc[0]["stage"] == "New":
+                        _updates["stage"] = "Contacted"
+                    save_lead(_lnk["lead_id"], _updates)
+                    _tracker = load_send_counts()
+                    _tracker["counts"][_lnk["sender"]] = _tracker["counts"].get(_lnk["sender"], 0) + 1
+                    save_send_counts(_tracker)
+                    if "seq_bulk_sent" not in st.session_state:
+                        st.session_state["seq_bulk_sent"] = set()
+                    st.session_state["seq_bulk_sent"].add(_opened_i)
+            except (ValueError, KeyError):
+                pass
+            # Clear the query param so it doesn't fire again on refresh
+            st.query_params.clear()
         if seq_q.empty:
             st.info("No leads enrolled in sequences yet.")
         else:
@@ -3113,6 +3141,9 @@ if _active_page == "sequences":
                         </div></div>'''
                 sender_html += '</div>'
                 st.markdown(sender_html, unsafe_allow_html=True)
+
+                # Cache for query-param click handler to lookup task on next rerun
+                st.session_state["_seq_links_cache"] = links
 
                 if links:
                     # Mirror Outreach session state keys (prefix seq_)
@@ -3266,16 +3297,23 @@ if _active_page == "sequences":
                             current_sender = lnk["sender"]
                             st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                         if i in sent_set:
-                            st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
+                            # Hide already-sent rows entirely
+                            continue
                         else:
-                            is_opened = i in st.session_state.get("seq_bulk_opened", set())
-                            status_icon = "📨" if is_opened else "✉"
                             lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
+                            # Anchor that opens Gmail in new tab — onclick navigates parent with query param
+                            # so Streamlit reruns and marks task as sent automatically.
                             with lc1:
                                 components.html(
-                                    f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                    f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:14px;font-weight:600;">'
-                                    f'{status_icon} {html_mod.escape(lnk["business"])}</a>',
+                                    f'''<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener"
+                                       onclick="setTimeout(function(){{
+                                         var u = new URL(window.parent.location.href);
+                                         u.searchParams.set('seq_opened', '{i}');
+                                         u.searchParams.set('seq_ts', Date.now());
+                                         window.parent.location.href = u.toString();
+                                       }}, 300);"
+                                       style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:14px;font-weight:600;">
+                                       ✉ {html_mod.escape(lnk["business"])}</a>''',
                                     height=30,
                                 )
                             with lc2:
