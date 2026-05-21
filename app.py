@@ -3105,27 +3105,48 @@ if _active_page == "sequences":
                     opened_set = st.session_state.get("seq_bulk_opened", set())
                     unopened = [i for i in unsent if i not in opened_set]
                     if unopened:
-                        tc1, tc2 = st.columns([1, 3])
-                        n_open = tc1.number_input("Open at once", 1, 50, 20, key="seq_open_n_top", label_visibility="visible")
-                        # Render an HTML/JS button that opens N tabs from a single click event (bypasses popup blocker better than triggering via Streamlit rerun)
+                        tc1, tc2, tc3 = st.columns([1, 2, 2])
+                        n_open = tc1.number_input("Open N", 1, 50, 20, key="seq_open_n_top")
                         to_open = unopened[:int(n_open)]
+
+                        # Option 1: In-browser bulk-open (anchor clicks) — works if popups allowed
                         anchors = "".join(f'<a id="lnk_{j}" href="{l}" target="_blank" rel="noopener" style="display:none">x</a>' for j, l in enumerate([links[i]["link"] for i in to_open]))
-                        js = "function openAll(){for(var j=0;j<" + str(len(to_open)) + ";j++){document.getElementById('lnk_'+j).click();}fetch(window.location.href);}"
+                        js = "function openAll(){for(var j=0;j<" + str(len(to_open)) + ";j++){document.getElementById('lnk_'+j).click();}}"
                         button_html = f"""
                         <div>
                           {anchors}
-                          <button onclick="openAll()" style="background:#7c3aed;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;width:100%;">📨 Open next {len(to_open)} in browser tabs</button>
-                          <div style="font-size:11px;color:#94a3b8;margin-top:6px;">If blocked: click 🔒 in address bar → Site settings → Pop-ups → Allow. Then reload and click again.</div>
+                          <button onclick="openAll()" style="background:#7c3aed;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:600;font-size:13px;cursor:pointer;width:100%;">📨 Open {len(to_open)} tabs (allow popups)</button>
                           <script>{js}</script>
                         </div>
                         """
                         with tc2:
-                            components.html(button_html, height=90)
-                            # Track that user clicked (we can't detect click directly from iframe, so add a manual mark-opened button)
-                            if st.button(f"Mark {len(to_open)} as opened", key="seq_mark_opened", help="Click after opening the tabs so they don't show up again"):
-                                for i in to_open:
-                                    st.session_state["seq_bulk_opened"].add(i)
-                                st.rerun()
+                            components.html(button_html, height=50)
+
+                        # Option 2: Download HTML opener — guaranteed to work (bypasses popup blocker)
+                        opener_html = f"""<!DOCTYPE html>
+<html><head><title>Open {len(to_open)} Gmail tabs</title></head>
+<body style="font-family:sans-serif;padding:40px;">
+<h1>Click button to open {len(to_open)} Gmail tabs</h1>
+<button onclick="openAll()" style="background:#7c3aed;color:#fff;border:none;padding:20px 40px;border-radius:8px;font-size:18px;cursor:pointer;">Open all {len(to_open)} tabs</button>
+{anchors}
+<script>{js}</script>
+<p style="margin-top:30px;color:#888;">After tabs open, return to CRM and click "Mark {len(to_open)} as opened".</p>
+</body></html>"""
+                        with tc3:
+                            st.download_button(
+                                label=f"⬇️ Download opener.html ({len(to_open)} tabs)",
+                                data=opener_html,
+                                file_name="open_gmail_tabs.html",
+                                mime="text/html",
+                                key="seq_download_opener",
+                                use_container_width=True,
+                                help="Download, double-click to open in browser, click the button — bypasses popup blocker",
+                            )
+
+                        if st.button(f"✓ Mark {len(to_open)} as opened", key="seq_mark_opened"):
+                            for i in to_open:
+                                st.session_state["seq_bulk_opened"].add(i)
+                            st.rerun()
                         if st.button(f"🔍 Check Gmail sent (auto-mark)", key="seq_check_top"):
                             try:
                                 from gmail_auth import check_sent_emails
