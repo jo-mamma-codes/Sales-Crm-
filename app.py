@@ -1400,6 +1400,19 @@ if "duplicates" not in st.session_state or st.session_state.get("_dupes_stale", 
 LEAD_SCORES = st.session_state["lead_scores"]
 DUPLICATES = st.session_state["duplicates"]
 
+# Refresh button in sidebar
+with st.sidebar:
+    if st.button("🔄 Refresh data", key="refresh_cache", use_container_width=True):
+        load_crm.clear()
+        load_activity.clear()
+        load_tasks.clear()
+        load_templates.clear()
+        st.session_state.pop("_df_cache", None)
+        st.session_state.pop("_df_cache_ts", None)
+        st.session_state["_score_stale"] = True
+        st.session_state["_dupes_stale"] = True
+        st.rerun()
+
 # Quick stats in sidebar
 with st.sidebar:
     st.markdown(f"""<div style="border-top:1px solid #2d2d4a;padding:12px 16px;margin-top:8px;">
