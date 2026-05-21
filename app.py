@@ -93,8 +93,20 @@ DEFAULT_TEMPLATES = {
 }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_templates():
+    """Prefer Supabase, fallback to file."""
+    try:
+        from supabase import create_client as _cc
+        _url = os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
+        _key = os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
+        if _url and _key:
+            _sb = _cc(_url, _key)
+            r = _sb.table("app_config").select("value").eq("key", "templates").execute()
+            if r.data and r.data[0].get("value"):
+                return json.loads(r.data[0]["value"]) if isinstance(r.data[0]["value"], str) else r.data[0]["value"]
+    except Exception:
+        pass
     if TEMPLATES.exists():
         return json.loads(TEMPLATES.read_text())
     TEMPLATES.write_text(json.dumps(DEFAULT_TEMPLATES, indent=2))
@@ -102,7 +114,14 @@ def load_templates():
 
 
 def save_templates(t):
-    TEMPLATES.write_text(json.dumps(t, indent=2))
+    try:
+        sb.table("app_config").upsert({"key": "templates", "value": json.dumps(t)}).execute()
+    except Exception as e:
+        print(f"Could not save templates to Supabase: {e}")
+    try:
+        TEMPLATES.write_text(json.dumps(t, indent=2))
+    except Exception:
+        pass
     load_templates.clear()
 
 
@@ -424,6 +443,16 @@ DEFAULT_SEQUENCES = {
 
 
 def load_sequences():
+    """Load sequences. Prefers Supabase (persistent) over local JSON file (ephemeral on cloud).
+    Falls back to file if table doesn't exist or query fails.
+    """
+    try:
+        r = sb.table("app_config").select("value").eq("key", "sequences").execute()
+        if r.data and r.data[0].get("value"):
+            return json.loads(r.data[0]["value"]) if isinstance(r.data[0]["value"], str) else r.data[0]["value"]
+    except Exception:
+        pass
+    # Fallback to local file
     if SEQUENCES.exists():
         return json.loads(SEQUENCES.read_text())
     SEQUENCES.write_text(json.dumps(DEFAULT_SEQUENCES, indent=2))
@@ -431,7 +460,16 @@ def load_sequences():
 
 
 def save_sequences(s):
-    SEQUENCES.write_text(json.dumps(s, indent=2))
+    """Save to both Supabase (persistent) and local file (fast read)."""
+    try:
+        sb.table("app_config").upsert({"key": "sequences", "value": json.dumps(s)}).execute()
+    except Exception as e:
+        # Table might not exist yet — keep working from file
+        print(f"Could not save sequences to Supabase: {e}")
+    try:
+        SEQUENCES.write_text(json.dumps(s, indent=2))
+    except Exception:
+        pass
 
 
 def load_seq_queue():
