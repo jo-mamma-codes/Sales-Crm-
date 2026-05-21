@@ -3197,22 +3197,23 @@ if _active_page == "sequences":
                         if i in sent_set:
                             st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
                         else:
-                            # Always show business name as a clickable Gmail link, regardless of opened state
                             is_opened = i in st.session_state.get("seq_bulk_opened", set())
                             status_icon = "📨" if is_opened else "✉"
                             lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
-                            lc1.markdown(
-                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                f'style="color:#7c3aed;text-decoration:none;font-size:14px;font-weight:600;">'
-                                f'{status_icon} {html_mod.escape(lnk["business"])}</a>',
-                                unsafe_allow_html=True,
-                            )
-                            lc2.markdown(
-                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                f'style="color:#64748b;text-decoration:none;font-size:12px;">'
-                                f'{html_mod.escape(lnk["email"])}</a>',
-                                unsafe_allow_html=True,
-                            )
+                            with lc1:
+                                components.html(
+                                    f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                    f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:14px;font-weight:600;">'
+                                    f'{status_icon} {html_mod.escape(lnk["business"])}</a>',
+                                    height=30,
+                                )
+                            with lc2:
+                                components.html(
+                                    f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                    f'style="color:#64748b;text-decoration:none;font-family:Inter,sans-serif;font-size:12px;">'
+                                    f'{html_mod.escape(lnk["email"])}</a>',
+                                    height=30,
+                                )
                             if lc4.button("🚫", key=f"seq_bdne_{i}", help="Skip — mark task skipped"):
                                 sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                 st.rerun()
