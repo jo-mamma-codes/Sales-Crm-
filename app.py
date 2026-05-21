@@ -3100,6 +3100,53 @@ if _active_page == "sequences":
                     unsent = [i for i, l in enumerate(links) if i not in sent_set]
                     prog_pct = len(sent_set) / len(links) * 100 if links else 0
 
+                    # ─── Top: JS bulk-open buttons (work on cloud) ───
+                    import streamlit.components.v1 as components
+                    opened_set = st.session_state.get("seq_bulk_opened", set())
+                    unopened = [i for i in unsent if i not in opened_set]
+                    if unopened:
+                        tc1, tc2, tc3 = st.columns([1, 2, 2])
+                        n_open = tc1.number_input("Open at once", 1, 50, 20, key="seq_open_n_top", label_visibility="visible")
+                        if tc2.button(f"📨 Open next {int(n_open)} in browser", type="primary", key="seq_bulk_open_top", use_container_width=True):
+                            to_open = unopened[:int(n_open)]
+                            js_links = "".join(f'window.open({json.dumps(links[i]["link"])}, "_blank");\n' for i in to_open)
+                            components.html(f"<script>{js_links}</script>", height=0)
+                            for i in to_open:
+                                st.session_state["seq_bulk_opened"].add(i)
+                            st.success(f"Opened {len(to_open)} Gmail tabs. Allow popups for this site if blocked.")
+                        if tc3.button(f"🔍 Check Gmail sent (auto-mark)", key="seq_check_top", use_container_width=True):
+                            try:
+                                from gmail_auth import check_sent_emails
+                                # Group by sender
+                                by_sender = {}
+                                for i in unsent:
+                                    by_sender.setdefault(links[i]["sender"], []).append(i)
+                                tracker = load_send_counts()
+                                newly_confirmed = 0
+                                for sender_email, idxs in by_sender.items():
+                                    recipients = [links[i]["email"] for i in idxs]
+                                    found = check_sent_emails(recipients, hours_back=48, sender_email=sender_email)
+                                    for i in idxs:
+                                        if links[i]["email"].lower() in found:
+                                            lnk = links[i]
+                                            sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                            log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                                            lead_row = df[df["id"] == str(lnk["lead_id"])]
+                                            updates = {"last_touch": date.today().isoformat()}
+                                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                                updates["stage"] = "Contacted"
+                                            save_lead(lnk["lead_id"], updates)
+                                            tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                                            st.session_state["seq_bulk_sent"].add(i)
+                                            newly_confirmed += 1
+                                save_send_counts(tracker)
+                                st.session_state["_last_check_msg"] = f"✅ Found {newly_confirmed} sent emails via Gmail"
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Gmail check failed: {e}")
+                    if st.session_state.get("_last_check_msg"):
+                        st.success(st.session_state.pop("_last_check_msg"))
+
                     st.markdown(f"""<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin-bottom:16px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                             <span style="font-size:14px;font-weight:600;color:#1a1a2e;">{len(links)} sequence email tasks</span>
