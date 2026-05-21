@@ -5,3 +5,4 @@ pandas>=2.0.0
 google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
 google-api-python-client>=2.0.0
+resend>=0.7.0

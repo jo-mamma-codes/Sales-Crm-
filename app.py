@@ -380,6 +380,30 @@ def gmail_link(to, subject, body, sender_email=None):
     url = f"https://mail.google.com/mail/u/0/?view=cm&fs=1&to={to}&su={su}&body={bo}"
     return url
 
+
+def send_via_resend(from_email, from_name, to_email, subject, body):
+    """Send via Resend API. Returns (success: bool, message_id_or_error: str)."""
+    api_key = os.environ.get("RESEND_API_KEY") or st.secrets.get("RESEND_API_KEY", "")
+    if not api_key:
+        return False, "RESEND_API_KEY not configured"
+    try:
+        import resend
+        resend.api_key = api_key
+        # Body sent as plain text — convert newlines to <br> for HTML version
+        html_body = body.replace("\n", "<br>")
+        params = {
+            "from": f"{from_name} <{from_email}>",
+            "to": [to_email],
+            "subject": subject,
+            "html": html_body,
+            "text": body,
+        }
+        r = resend.Emails.send(params)
+        msg_id = r.get("id") if isinstance(r, dict) else str(r)
+        return True, msg_id
+    except Exception as e:
+        return False, str(e)
+
 DEFAULT_SEQUENCES = {
     "Cold outreach": {
         "steps": [
@@ -3105,6 +3129,53 @@ if _active_page == "sequences":
                     opened_set = st.session_state.get("seq_bulk_opened", set())
                     unopened = [i for i in unsent if i not in opened_set]
                     if unopened:
+                        # ─── RESEND BULK SEND (auto, no tabs) ───
+                        rs1, rs2 = st.columns([1, 3])
+                        n_send = rs1.number_input("Send N", 1, 50, 20, key="seq_resend_n")
+                        to_send = unopened[:int(n_send)]
+                        if rs2.button(f"🚀 Send {len(to_send)} via Resend (auto)", type="primary", key="seq_resend_send", use_container_width=True):
+                            tracker = load_send_counts()
+                            sent_ok, failed = 0, 0
+                            errors = []
+                            progress = st.progress(0, text=f"Sending {len(to_send)} via Resend...")
+                            for n, i in enumerate(to_send):
+                                lnk = links[i]
+                                sender_info = next((s for s in SENDERS if s["email"] == lnk["sender"]), None)
+                                from_name = sender_info["name"] if sender_info else "Sales"
+                                ok, msg = send_via_resend(lnk["sender"], from_name, lnk["email"], lnk["subject"], lnk["body"])
+                                if ok:
+                                    sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                    log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                                    lead_row = df[df["id"] == str(lnk["lead_id"])]
+                                    updates = {"last_touch": date.today().isoformat()}
+                                    if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                        updates["stage"] = "Contacted"
+                                    save_lead(lnk["lead_id"], updates)
+                                    tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                                    st.session_state["seq_bulk_sent"].add(i)
+                                    sent_ok += 1
+                                else:
+                                    failed += 1
+                                    errors.append(f"{lnk['business']}: {msg}")
+                                progress.progress(min(99, int((n+1) / len(to_send) * 100)), text=f"Sent {n+1}/{len(to_send)}...")
+                            save_send_counts(tracker)
+                            progress.progress(100, text="Done!")
+                            st.session_state["_last_resend_msg"] = f"✅ Resend complete: {sent_ok} sent, {failed} failed"
+                            if errors:
+                                st.session_state["_last_resend_errors"] = errors[:10]
+                            st.rerun()
+
+                        if st.session_state.get("_last_resend_msg"):
+                            st.success(st.session_state.pop("_last_resend_msg"))
+                        if st.session_state.get("_last_resend_errors"):
+                            with st.expander("⚠️ Failed sends"):
+                                for e in st.session_state["_last_resend_errors"]:
+                                    st.write(f"- {e}")
+                            del st.session_state["_last_resend_errors"]
+
+                        st.markdown("---")
+                        st.caption("Or open in Gmail tabs manually:")
+
                         tc1, tc2, tc3 = st.columns([1, 2, 2])
                         n_open = tc1.number_input("Open N", 1, 50, 20, key="seq_open_n_top")
                         to_open = unopened[:int(n_open)]
