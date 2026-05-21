@@ -3065,15 +3065,53 @@ if _active_page == "sequences":
         already = set(seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
         pool = pool[~pool["id"].isin(already)]
         st.caption(f"{len(pool)} eligible leads (not already enrolled)")
-        e_limit = st.slider("Enroll how many", 1, min(len(pool), 500) if len(pool) > 0 else 1,
-                            min(50, len(pool)) if len(pool) > 0 else 1, key="seq_e_limit")
-        if st.button(f"Enroll {e_limit} leads", type="primary", key="seq_e_go"):
-            enrolled = 0
-            for _, row in pool.head(e_limit).iterrows():
-                enroll_lead(row["id"], row["business_name"], seq_name, sequences)
-                enrolled += 1
-            st.success(f"Enrolled {enrolled} leads into '{seq_name}'")
-            st.rerun()
+
+        if len(pool) == 0:
+            st.warning("No eligible leads match these filters. Check stage filter, import filter, and that leads have email addresses.")
+            # Show diagnostic
+            with st.expander("Why 0 leads?"):
+                _all_sources = sorted([s for s in df["source"].dropna().unique().tolist() if s])
+                st.write(f"**Available import sources:** {_all_sources}")
+                if e_import != "All imports":
+                    _src_count = len(df[df["source"] == e_import])
+                    st.write(f"**Leads with source='{e_import}':** {_src_count}")
+                    if _src_count > 0:
+                        _src_df = df[df["source"] == e_import]
+                        _stages_in_src = _src_df["stage"].value_counts().to_dict()
+                        st.write(f"**Stages in this import:** {_stages_in_src}")
+                        _with_email = len(_src_df[_src_df["email"].str.contains("@", na=False)])
+                        st.write(f"**With valid email:** {_with_email}")
+        else:
+            e_limit = st.slider("Enroll how many", 1, max(min(len(pool), 500), 2),
+                                min(50, len(pool)), key="seq_e_limit") if len(pool) > 1 else 1
+            if len(pool) == 1:
+                st.caption("Only 1 lead in pool — enroll all")
+
+            # PREVIEW: show rendered emails for first lead
+            with st.expander("📧 Preview emails (first lead)", expanded=True):
+                _preview_lead = pool.iloc[0].to_dict()
+                st.caption(f"Preview for: **{_preview_lead.get('business_name')}** ({_preview_lead.get('contact_name')} - {_preview_lead.get('email')})")
+                for step_idx, step in enumerate(seq_def["steps"]):
+                    st.markdown(f"**Step {step_idx+1} — Day {step['day']} — {step['channel'].upper()}**")
+                    if step["channel"] == "email" and step.get("template"):
+                        tmpl_name = step["template"]
+                        if tmpl_name in templates:
+                            _s, _b = render_template(templates[tmpl_name], _preview_lead)
+                            st.markdown(f"*Subject:* `{_s}`")
+                            st.code(_b, language=None)
+                        else:
+                            st.error(f"⚠️ Template '{tmpl_name}' not found in templates.json")
+                    elif step["channel"] == "call":
+                        st.caption(f"📞 Call task (no email)")
+                    st.markdown("---")
+
+            if st.button(f"Enroll {e_limit} leads into '{seq_name}'", type="primary", key="seq_e_go"):
+                enrolled = 0
+                for _, row in pool.head(e_limit).iterrows():
+                    enroll_lead(row["id"], row["business_name"], seq_name, sequences)
+                    enrolled += 1
+                st.success(f"Enrolled {enrolled} leads into '{seq_name}'")
+                st.rerun()
 
     elif seq_sub == "Manage sequences":
         st.subheader("Create / edit sequences")
