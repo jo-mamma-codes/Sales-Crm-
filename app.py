@@ -1488,18 +1488,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     templates = load_templates()
     esc = html_mod.escape
 
-    # ── Top bar: breadcrumb + back ──
-    _bc1, _bc2 = st.columns([1.5, 5])
-    _bc1.button("← Back to list", on_click=close_profile, key="pv_back", type="primary")
-    _bc2.markdown(f"""<div style="display:flex;align-items:center;gap:8px;padding:10px 0;">
-        <span style="font-size:12px;color:#94a3b8;">Contacts</span>
-        <span style="font-size:12px;color:#94a3b8;">›</span>
-        <span style="font-size:13px;color:#1a1a2e;font-weight:600;">{html_mod.escape(lead['contact_name'] or 'Unknown')}</span>
-    </div>""", unsafe_allow_html=True)
-
-    # ── 3 column layout: left sidebar | center activity | right sidebar ──
-    left_col, center_col, right_col = st.columns([1.2, 2.5, 1.3])
-
+    # ── Precompute common values ──
     initials = "".join(w[0] for w in (lead["contact_name"] or "?").split()[:2]).upper() or "?"
     pill_cls = PILL_MAP.get(lead["stage"], "stage-pill-new")
     name_parts = (lead["contact_name"] or "").split()
@@ -1507,78 +1496,76 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "--"
     _lead_county = get_county(lead.get("region"))
     _lead_industry = get_industry(lead.get("category"))
+    _deal_val = lead.get("deal_value", 0) or 0
+    _score, _score_label, _score_color = LEAD_SCORES.get(lead_id, (0, "🧊 Cold", "#94a3b8"))
+    _biz_initials = "".join(w[0] for w in (lead["business_name"] or "?").split()[:2]).upper()
+    lead_pipeline = lead.get("pipeline") or "Sales"
+    lead_stages = PIPELINES.get(lead_pipeline, STAGES)
+    phone_href = f'<a href="tel:{esc(lead["phone"])}" style="color:#3b82f6;text-decoration:none;">{esc(lead["phone"])}</a>' if lead["phone"] else '--'
+    email_href = f'<a href="mailto:{esc(lead["email"])}" style="color:#3b82f6;text-decoration:none;">{esc(lead["email"])}</a>' if lead["email"] else '--'
 
-    # ━━━ LEFT COLUMN: Contact card + About ━━━
-    with left_col:
-        phone_href = f'<a href="tel:{esc(lead["phone"])}" class="profile-action-btn">📞</a>' if lead["phone"] else '<span class="profile-action-btn" style="opacity:0.3">📞</span>'
-        email_href = f'<a href="mailto:{esc(lead["email"])}" class="profile-action-btn">✉️</a>' if lead["email"] else '<span class="profile-action-btn" style="opacity:0.3">✉️</span>'
-
-        st.markdown(f"""<div class="profile-card">
-            <div class="profile-avatar">{esc(initials)}</div>
-            <div class="profile-name">{esc(lead['contact_name'] or 'Unknown')}</div>
-            <div class="profile-role">{esc(lead['business_name'])}</div>
-            <div class="profile-email">{esc(lead['email'] or 'No email')}</div>
-            <div class="profile-actions">
-                <div class="profile-action-item"><span class="profile-action-btn">📝</span><span class="profile-action-label">Note</span></div>
-                <div class="profile-action-item">{email_href}<span class="profile-action-label">Email</span></div>
-                <div class="profile-action-item">{phone_href}<span class="profile-action-label">Call</span></div>
-                <div class="profile-action-item"><span class="profile-action-btn">📋</span><span class="profile-action-label">Task</span></div>
+    # ── Top bar: breadcrumb + deal name + stage + actions ──
+    _hdr1, _hdr2 = st.columns([4, 2])
+    with _hdr1:
+        st.button("← Back", on_click=close_profile, key="pv_back")
+        st.markdown(f"""<div style="padding:4px 0 12px;">
+            <div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">
+                Pipeline › {esc(lead_pipeline)} › {esc(lead['stage'])}
             </div>
+            <div style="font-size:24px;font-weight:800;color:#1a1a2e;letter-spacing:-0.5px;">{esc(lead['business_name'])}</div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px;">{esc(lead['contact_name'] or 'No contact')} · {esc(_lead_industry)} · {esc(_lead_county)}</div>
+        </div>""", unsafe_allow_html=True)
+    with _hdr2:
+        st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
+        _hc1, _hc2, _hc3 = st.columns(3)
+        _stage_idx = lead_stages.index(lead["stage"]) if lead["stage"] in lead_stages else 0
+        _new_stage = _hc1.selectbox("Stage", lead_stages, index=_stage_idx, key="pv_stage_quick", label_visibility="collapsed")
+        if _new_stage != lead["stage"]:
+            save_lead(lead_id, {"stage": _new_stage})
+            st.rerun()
+        st.markdown(f"""<div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;">
+            <span style="font-size:24px;font-weight:800;color:#059669;">£{_deal_val:,.0f}</span>
+            <span style="color:{_score_color};font-size:12px;font-weight:600;background:{_score_color}15;padding:3px 8px;border-radius:6px;">{_score_label}</span>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown(f"""<div class="profile-section">
-            <div class="profile-section-header"><span class="profile-section-title">About this contact</span></div>
-            <div class="profile-field"><div class="profile-field-label">First name</div><div class="profile-field-value">{esc(first_name)}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Last name</div><div class="profile-field-value">{esc(last_name)}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Email</div><div class="profile-field-value">{esc(lead['email'] or '--')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Phone</div><div class="profile-field-value">{esc(lead['phone'] or '--')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Company</div><div class="profile-field-value">{esc(lead['business_name'])}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Stage</div><div class="profile-field-value"><span class="contact-stage {pill_cls}">{esc(lead['stage'])}</span></div></div>
-            <div class="profile-field"><div class="profile-field-label">Industry</div><div class="profile-field-value">{esc(_lead_industry)}</div></div>
-            <div class="profile-field"><div class="profile-field-label">County</div><div class="profile-field-value">{esc(_lead_county)}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Source</div><div class="profile-field-value">{esc(lead['source'] or '--')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Created</div><div class="profile-field-value">{esc(lead['created'] or '--')}</div></div>
-        </div>""", unsafe_allow_html=True)
+    # ── Stage progress bar ──
+    _stage_dots = ""
+    for si, sname in enumerate(lead_stages):
+        _active = "background:#7c3aed;color:#fff;border-color:#7c3aed;" if sname == lead["stage"] else ("background:#e8f5e9;color:#059669;border-color:#059669;" if si < _stage_idx else "background:#f8f9fb;color:#94a3b8;border-color:#e2e4e9;")
+        _stage_dots += f'<span style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;border:1.5px solid;{_active}">{esc(sname)}</span>'
+    st.markdown(f'<div style="display:flex;gap:4px;flex-wrap:wrap;padding:8px 0 16px;border-bottom:1px solid #e2e4e9;">{_stage_dots}</div>', unsafe_allow_html=True)
 
-        with st.expander("✏️ Edit contact"):
-            new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
-            new_phone = st.text_input("Phone", lead["phone"], key="pv_phone")
-            new_email = st.text_input("Email", lead["email"], key="pv_email")
-            lead_pipeline = lead.get("pipeline") or "Sales"
-            lead_stages = PIPELINES.get(lead_pipeline, STAGES)
-            new_stage = st.selectbox("Stage", lead_stages, index=lead_stages.index(lead["stage"]) if lead["stage"] in lead_stages else 0, key="pv_stage")
-            nad_val = None
-            if lead["next_action_date"]:
-                try:
-                    nad_val = datetime.fromisoformat(lead["next_action_date"]).date()
-                except Exception:
-                    pass
-            new_nad = st.date_input("Next action date", value=nad_val, key="pv_nad")
-            new_na = st.text_input("Next action", lead["next_action"], key="pv_na")
-            new_deal_value = st.number_input("Deal value (£)", value=float(lead.get("deal_value") or 0), min_value=0.0, step=50.0, key="pv_deal")
-            new_notes = st.text_area("Notes", lead["notes"], height=80, key="pv_notes")
-            if st.button("Save", type="primary", key="pv_save"):
-                save_lead(lead_id, {
-                    "contact_name": new_contact, "phone": new_phone, "email": new_email,
-                    "stage": new_stage, "next_action_date": new_nad.isoformat() if new_nad else "",
-                    "next_action": new_na, "notes": new_notes, "deal_value": new_deal_value,
-                })
-                st.rerun()
+    # ── 2 column layout: main content | properties sidebar ──
+    main_col, props_col = st.columns([2.5, 1.5])
 
-    # ━━━ RIGHT COLUMN: Deal, Company, Score ━━━
-    with right_col:
-        _deal_val = lead.get("deal_value", 0) or 0
-        _score, _score_label, _score_color = LEAD_SCORES.get(lead_id, (0, "🧊 Cold", "#94a3b8"))
-        _biz_initials = "".join(w[0] for w in (lead["business_name"] or "?").split()[:2]).upper()
-
-        # Deal card
+    # ━━━ RIGHT: Properties sidebar ━━━
+    with props_col:
+        # Deal Properties
         st.markdown(f"""<div class="profile-sidebar-card">
-            <h4>Deal</h4>
-            <div class="sidebar-row"><span class="label">Value</span><span class="value" style="color:#059669;">£{_deal_val:,.0f}</span></div>
-            <div class="sidebar-row"><span class="label">Pipeline</span><span class="value">{esc(lead.get('pipeline') or 'Sales')}</span></div>
+            <h4>Deal Properties</h4>
+            <div class="sidebar-row"><span class="label">Deal Value</span><span class="value" style="color:#059669;">£{_deal_val:,.0f}</span></div>
+            <div class="sidebar-row"><span class="label">Pipeline</span><span class="value">{esc(lead_pipeline)}</span></div>
             <div class="sidebar-row"><span class="label">Stage</span><span class="value"><span class="contact-stage {pill_cls}">{esc(lead['stage'])}</span></span></div>
-            <div class="sidebar-row"><span class="label">Next action</span><span class="value">{esc(lead.get('next_action') or '--')}</span></div>
-            <div class="sidebar-row"><span class="label">Next date</span><span class="value">{esc(lead.get('next_action_date') or '--')}</span></div>
+            <div class="sidebar-row"><span class="label">Lead Score</span><span class="value" style="color:{_score_color};">{_score} — {_score_label}</span></div>
+            <div class="sidebar-row"><span class="label">Next Action</span><span class="value">{esc(lead.get('next_action') or '--')}</span></div>
+            <div class="sidebar-row"><span class="label">Next Date</span><span class="value">{esc(lead.get('next_action_date') or '--')}</span></div>
+            <div class="sidebar-row"><span class="label">Last Touch</span><span class="value">{esc(lead['last_touch'] or 'Never')}</span></div>
+            <div class="sidebar-row"><span class="label">Created</span><span class="value">{esc(lead['created'] or '--')}</span></div>
+            <div class="sidebar-row"><span class="label">Source</span><span class="value">{esc(lead['source'] or '--')}</span></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Contact card
+        st.markdown(f"""<div class="profile-sidebar-card">
+            <h4>Contact</h4>
+            <div class="sidebar-company">
+                <div class="company-icon" style="border-radius:50%;">{esc(initials)}</div>
+                <div class="company-info">
+                    <div class="company-name">{esc(lead['contact_name'] or 'Unknown')}</div>
+                    <div class="company-detail">{esc(lead['business_name'])}</div>
+                </div>
+            </div>
+            <div class="sidebar-row"><span class="label">Email</span><span class="value">{email_href}</span></div>
+            <div class="sidebar-row"><span class="label">Phone</span><span class="value">{phone_href}</span></div>
         </div>""", unsafe_allow_html=True)
 
         # Company card
@@ -1593,25 +1580,51 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             </div>
         </div>""", unsafe_allow_html=True)
 
-        # Lead score card
-        st.markdown(f"""<div class="profile-sidebar-card">
-            <h4>Lead Score</h4>
-            <div style="text-align:center;padding:8px 0;">
-                <div style="font-size:28px;font-weight:800;color:{_score_color};">{_score}</div>
-                <div style="font-size:13px;color:{_score_color};font-weight:600;">{_score_label}</div>
-            </div>
-            <div class="sidebar-row"><span class="label">Last touch</span><span class="value">{esc(lead['last_touch'] or 'Never')}</span></div>
-        </div>""", unsafe_allow_html=True)
-
         # Notes card
-        _notes_preview = (lead.get("notes") or "--")[:200]
+        _notes_preview = (lead.get("notes") or "--")[:300]
         st.markdown(f"""<div class="profile-sidebar-card">
             <h4>Notes</h4>
             <div style="font-size:12px;color:#64748b;white-space:pre-wrap;line-height:1.5;">{esc(_notes_preview)}</div>
         </div>""", unsafe_allow_html=True)
 
-    # ━━━ CENTER COLUMN: Activity tabs ━━━
-    with center_col:
+        # Edit deal
+        with st.expander("✏️ Edit Deal"):
+            new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
+            new_phone = st.text_input("Phone", lead["phone"], key="pv_phone")
+            new_email = st.text_input("Email", lead["email"], key="pv_email")
+            new_stage = st.selectbox("Stage", lead_stages, index=lead_stages.index(lead["stage"]) if lead["stage"] in lead_stages else 0, key="pv_stage")
+            nad_val = None
+            if lead["next_action_date"]:
+                try:
+                    nad_val = datetime.fromisoformat(lead["next_action_date"]).date()
+                except Exception:
+                    pass
+            new_nad = st.date_input("Next action date", value=nad_val, key="pv_nad")
+            new_na = st.text_input("Next action", lead["next_action"], key="pv_na")
+            new_deal_value = st.number_input("Deal value (£)", value=float(lead.get("deal_value") or 0), min_value=0.0, step=50.0, key="pv_deal")
+            new_notes = st.text_area("Notes", lead["notes"], height=80, key="pv_notes")
+            if st.button("Save Changes", type="primary", key="pv_save", use_container_width=True):
+                save_lead(lead_id, {
+                    "contact_name": new_contact, "phone": new_phone, "email": new_email,
+                    "stage": new_stage, "next_action_date": new_nad.isoformat() if new_nad else "",
+                    "next_action": new_na, "notes": new_notes, "deal_value": new_deal_value,
+                })
+                st.rerun()
+
+        # Delete deal — confirmation modal
+        with st.expander("🗑️ Delete Deal"):
+            st.warning("This permanently deletes this deal and all associated data.")
+            _confirm_name = st.text_input("Type the business name to confirm:", key="pv_del_confirm", placeholder=lead["business_name"])
+            if st.button("Delete permanently", type="primary", key="pv_del_btn", use_container_width=True):
+                if _confirm_name.strip().lower() == lead["business_name"].strip().lower():
+                    sb.table("leads").delete().eq("id", lead_id).execute()
+                    close_profile()
+                    st.rerun()
+                else:
+                    st.error("Business name doesn't match. Type it exactly to confirm.")
+
+    # ━━━ LEFT: Activity tabs ━━━
+    with main_col:
         act_tab = st.radio("", ["Email", "Call / Note", "Tasks", "Timeline"], horizontal=True, key="pv_action_tab")
 
         if act_tab == "Email":
@@ -1983,23 +1996,12 @@ if _active_page == "pipeline":
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    # Compact row: Open button + stage dropdown + delete
-                    bc1, bc2, bc3 = st.columns([1.5, 2.5, 0.5])
+                    # Compact row: clickable name opens deal page + stage dropdown
+                    bc1, bc2 = st.columns([1.2, 2])
                     bc1.button("Open", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
                     _move_to = bc2.selectbox("Move", active_stages, index=stage_idx, key=f"mv_{row['id']}", label_visibility="collapsed")
                     if _move_to != stage:
                         _move_and_rerun(row["id"], _move_to)
-                    if bc3.button("🗑", key=f"del_{row['id']}", use_container_width=True):
-                        st.session_state[f"confirm_del_{row['id']}"] = True
-                    if st.session_state.get(f"confirm_del_{row['id']}"):
-                        dc1, dc2 = st.columns(2)
-                        if dc1.button("Yes delete", key=f"ydel_{row['id']}", type="primary", use_container_width=True):
-                            sb.table("leads").delete().eq("id", row["id"]).execute()
-                            st.session_state.pop(f"confirm_del_{row['id']}", None)
-                            st.rerun()
-                        if dc2.button("Cancel", key=f"cdel_{row['id']}", use_container_width=True):
-                            st.session_state.pop(f"confirm_del_{row['id']}", None)
-                            st.rerun()
 
             remaining = len(stage_df) - show_count
             if remaining > 0:
