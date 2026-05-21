@@ -19,8 +19,9 @@ TEMPLATES = ROOT / "templates.json"
 LEADS_SRC = ROOT.parent / "data" / "ready_for_outreach.csv"
 SEQUENCES = ROOT / "sequences.json"
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+# Support both .env (local) and st.secrets (Streamlit Cloud)
+SUPABASE_URL = os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
 
 @st.cache_resource
 def get_supabase():
@@ -126,10 +127,195 @@ def log_activity(lead_id, business_name, type_, subject, content):
     sb.table("activity").insert(row).execute()
 
 
+def load_tasks(lead_id=None):
+    q = sb.table("tasks").select("*")
+    if lead_id:
+        q = q.eq("lead_id", int(lead_id))
+    try:
+        r = q.order("due_date").execute()
+        return r.data or []
+    except Exception:
+        return []
+
+
+def create_task(lead_id, title, due_date=None, assigned_to=None, notes=None):
+    row = {"lead_id": int(lead_id), "title": title, "status": "pending"}
+    if due_date:
+        row["due_date"] = due_date
+    if assigned_to:
+        row["assigned_to"] = assigned_to
+    if notes:
+        row["notes"] = notes
+    try:
+        sb.table("tasks").insert(row).execute()
+    except Exception:
+        pass
+
+
+def update_task(task_id, updates):
+    try:
+        sb.table("tasks").update(updates).eq("id", int(task_id)).execute()
+    except Exception:
+        pass
+
+
+# ─── Lead Scoring ────────────────────────────────────────────────────────────
+def score_lead(lead, activity_df):
+    """Score a lead 0-100 based on engagement. Returns (score, label, color)."""
+    score = 0
+    lid = str(lead.get("id", ""))
+
+    # Stage points
+    stage_pts = {"New": 5, "Contacted": 20, "Demo Booked": 50, "Proposal": 70, "Won": 100, "Lost": 0}
+    score += stage_pts.get(lead.get("stage", ""), 0)
+
+    # Activity count
+    if not activity_df.empty:
+        lead_acts = activity_df[activity_df["lead_id"] == lid]
+        n_acts = len(lead_acts)
+        score += min(n_acts * 5, 20)  # max 20 pts from activity
+
+        # Email replies (check notes for [REPLIED])
+        if "[REPLIED]" in str(lead.get("notes", "")):
+            score += 15
+
+    # Deal value bonus
+    dv = float(lead.get("deal_value", 0) or 0)
+    if dv > 0:
+        score += 10
+
+    # Recency penalty
+    lt = lead.get("last_touch", "")
+    if lt:
+        try:
+            days_since = (date.today() - date.fromisoformat(str(lt)[:10])).days
+            if days_since <= 3:
+                score += 10
+            elif days_since <= 7:
+                score += 5
+            elif days_since > 14:
+                score -= 10
+            if days_since > 30:
+                score -= 15
+        except Exception:
+            pass
+
+    score = max(0, min(score, 100))
+
+    if score >= 60:
+        return score, "🔥 Hot", "#ef4444"
+    elif score >= 30:
+        return score, "🟡 Warm", "#f59e0b"
+    else:
+        return score, "🧊 Cold", "#94a3b8"
+
+
+def days_since_touch(lead):
+    """Return days since last touch, or None."""
+    lt = lead.get("last_touch", "")
+    if lt:
+        try:
+            return (date.today() - date.fromisoformat(str(lt)[:10])).days
+        except Exception:
+            pass
+    return None
+
+
+def detect_duplicates(df):
+    """Find duplicate leads by email or business name. Returns dict of {lead_id: [dup_ids]}."""
+    dupes = {}
+    # Email duplicates
+    email_groups = df[df["email"].str.contains("@", na=False)].groupby(df["email"].str.lower())
+    for email, group in email_groups:
+        if len(group) > 1:
+            ids = group["id"].tolist()
+            for lid in ids:
+                dupes.setdefault(lid, set()).update(ids)
+                dupes[lid].discard(lid)
+
+    # Business name duplicates (exact match, case-insensitive)
+    biz_groups = df[df["business_name"] != ""].groupby(df["business_name"].str.lower())
+    for biz, group in biz_groups:
+        if len(group) > 1:
+            ids = group["id"].tolist()
+            for lid in ids:
+                dupes.setdefault(lid, set()).update(ids)
+                dupes[lid].discard(lid)
+
+    return {k: list(v) for k, v in dupes.items() if v}
+
+
+def analyze_email_ai(email_text, business_name=""):
+    """Use Claude to analyze an email reply for sentiment, intent, and next action."""
+    try:
+        import anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return None
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{"role": "user", "content": f"""Analyze this sales email reply from {business_name}. Return JSON only:
+{{"sentiment": "positive/neutral/negative",
+"intent": "interested/maybe/not_interested/asking_questions/objection",
+"urgency": "high/medium/low",
+"summary": "one sentence",
+"suggested_action": "what the sales rep should do next"}}
+
+Email:
+{email_text[:2000]}"""}],
+        )
+        import re
+        text = resp.content[0].text
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+    except Exception:
+        pass
+    return None
+
+
 OPT_OUT_LINE = "\n\nTo opt out, reply 'unsubscribe'."
 
+# Sender email signatures (plain text for Gmail compose URLs)
+SIGNATURES = {
+    "joseph.allison@yetipay.me": (
+        "\n\n--\n"
+        "Joseph Allison\n"
+        "Senior Sales Manager\n"
+        "joseph@yetipay.me\n"
+        "www.yetipay.me\n"
+        "17 St Anne's Court, London, W1F 0BQ"
+    ),
+    "dominic.ritchie@yetipay.me": (
+        "\n\n--\n"
+        "Dominic Ritchie\n"
+        "Yetipay\n"
+        "dominic.ritchie@yetipay.me\n"
+        "www.yetipay.me\n"
+        "17 St Anne's Court, London, W1F 0BQ"
+    ),
+    "insidesales@yetipay.me": (
+        "\n\n--\n"
+        "Yetipay Sales Team\n"
+        "insidesales@yetipay.me\n"
+        "www.yetipay.me\n"
+        "17 St Anne's Court, London, W1F 0BQ"
+    ),
+    "ashley@yetipay.me": (
+        "\n\n--\n"
+        "Ashley\n"
+        "Yetipay\n"
+        "ashley@yetipay.me\n"
+        "www.yetipay.me\n"
+        "17 St Anne's Court, London, W1F 0BQ"
+    ),
+}
+DEFAULT_SIGNATURE = SIGNATURES["joseph.allison@yetipay.me"]
 
-def render_template(tmpl, lead):
+
+def render_template(tmpl, lead, sender_email=None):
     """Replace {{token}} placeholders with CRM record values."""
     subj, body = tmpl["subject"], tmpl["body"]
     for token, (field, transform) in TOKENS.items():
@@ -138,6 +324,11 @@ def render_template(tmpl, lead):
         body = body.replace(token, val)
     if OPT_OUT_LINE.strip() not in body:
         body += OPT_OUT_LINE
+    # Append sender signature (skip if body already has signature-like content)
+    sig = SIGNATURES.get(sender_email, DEFAULT_SIGNATURE)
+    _has_sig = any(marker in body.lower() for marker in ["st anne's court", "www.yetipay.me", "best regards"])
+    if not _has_sig:
+        body += sig
     return subj, body
 
 
@@ -147,11 +338,12 @@ def mailto_link(to, subject, body):
 
 
 SENDERS = [
-    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 40},
-    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 40},
-    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 40},
-    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 40},
+    {"email": "joseph.allison@yetipay.me", "name": "Joseph Allison", "daily_cap": 100, "chrome_profile": "Profile 5"},
+    {"email": "insidesales@yetipay.me", "name": "Yetipay Sales", "daily_cap": 100, "chrome_profile": "Profile 4"},
+    {"email": "dominic.ritchie@yetipay.me", "name": "Dominic Ritchie", "daily_cap": 100, "chrome_profile": "Profile 1"},
+    {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 100, "chrome_profile": "Profile 5"},  # no own profile yet
 ]
+SENDER_PROFILE = {s["email"]: s["chrome_profile"] for s in SENDERS}
 SEND_TRACKER = ROOT / "send_tracker.json"
 
 
@@ -180,8 +372,6 @@ def gmail_link(to, subject, body, sender_email=None):
     su = urllib.parse.quote(subject, safe="")
     bo = urllib.parse.quote(body, safe="")
     url = f"https://mail.google.com/mail/u/0/?view=cm&fs=1&to={to}&su={su}&body={bo}"
-    if sender_email:
-        url += f"&authuser={sender_email}"
     return url
 
 DEFAULT_SEQUENCES = {
@@ -287,18 +477,189 @@ def load_gmail_cache(email_addr):
     return None
 
 
+def fetch_gmail_for_contact(contact_email):
+    """Fetch sent & received emails for a contact via Gmail API and cache them."""
+    try:
+        from gmail_auth import get_gmail_service
+        import base64
+        service = get_gmail_service()
+        if not service:
+            return None
+
+        threads_data = []
+        # Search sent + received for this contact
+        query = f"to:{contact_email} OR from:{contact_email}"
+        results = service.users().messages().list(
+            userId="me", q=query, maxResults=30
+        ).execute()
+
+        messages = results.get("messages", [])
+        for msg_ref in messages:
+            try:
+                msg = service.users().messages().get(
+                    userId="me", id=msg_ref["id"], format="metadata",
+                    metadataHeaders=["From", "To", "Subject", "Date"]
+                ).execute()
+                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                threads_data.append({
+                    "messages": [{
+                        "id": msg["id"],
+                        "sender": headers.get("From", ""),
+                        "to": headers.get("To", ""),
+                        "subject": headers.get("Subject", ""),
+                        "date": headers.get("Date", ""),
+                        "snippet": msg.get("snippet", ""),
+                    }]
+                })
+            except Exception:
+                continue
+
+        cache_gmail_threads(contact_email, threads_data)
+        return len(threads_data)
+    except Exception as e:
+        return None
+
+
+# ─── Region → County mapping ─────────────────────────────────────────────────
+REGION_TO_COUNTY = {
+    # Major cities
+    "aberdeen": "Aberdeenshire", "bath": "Somerset", "belfast": "Northern Ireland",
+    "birmingham": "West Midlands", "bournemouth": "Dorset", "brighton-and-hove": "East Sussex",
+    "cambridge": "Cambridgeshire", "cardiff": "South Glamorgan", "cheltenham": "Gloucestershire",
+    "city-of-bristol": "Bristol", "coventry": "West Midlands", "derby": "Derbyshire",
+    "dudley": "West Midlands", "dundee": "Angus", "edinburgh": "Lothian",
+    "exeter": "Devon", "glasgow": "Lanarkshire", "gloucester": "Gloucestershire",
+    "hull": "East Yorkshire", "leicester": "Leicestershire", "liverpool": "Merseyside",
+    "manchester": "Greater Manchester", "milton-keynes": "Buckinghamshire", "york": "North Yorkshire",
+    # Cornwall towns
+    "newquay": "Cornwall", "bodmin": "Cornwall", "truro": "Cornwall", "padstow": "Cornwall",
+    "st-ives": "Cornwall", "falmouth": "Cornwall", "penzance": "Cornwall", "bude": "Cornwall",
+    "launceston": "Cornwall", "liskeard": "Cornwall", "helston": "Cornwall", "redruth": "Cornwall",
+    "camborne": "Cornwall", "wadebridge": "Cornwall", "looe": "Cornwall", "fowey": "Cornwall",
+    "st-austell": "Cornwall", "saltash": "Cornwall", "torpoint": "Cornwall", "hayle": "Cornwall",
+    "perranporth": "Cornwall", "mevagissey": "Cornwall", "porthleven": "Cornwall",
+    "st-just": "Cornwall", "marazion": "Cornwall", "mousehole": "Cornwall",
+    # Devon towns
+    "plymouth": "Devon", "torquay": "Devon", "paignton": "Devon", "barnstaple": "Devon",
+    "tiverton": "Devon", "dartmouth": "Devon", "totnes": "Devon", "sidmouth": "Devon",
+    # Somerset towns
+    "taunton": "Somerset", "wells": "Somerset", "glastonbury": "Somerset", "frome": "Somerset",
+    # Dorset towns
+    "poole": "Dorset", "weymouth": "Dorset", "dorchester": "Dorset",
+}
+
+
+def get_county(region):
+    """Map a region/town to its county. Falls back to title-cased region."""
+    if not region:
+        return "Unknown"
+    return REGION_TO_COUNTY.get(region.lower().strip(), region.replace("-", " ").title())
+
+
+CATEGORY_TO_INDUSTRY = {
+    # Restaurants & Food Service
+    "american_restaurant": "Restaurants & Food", "asian_grocery_store": "Restaurants & Food",
+    "bakery": "Restaurants & Food", "bistro": "Restaurants & Food", "breakfast_restaurant": "Restaurants & Food",
+    "british_restaurant": "Restaurants & Food", "cafe": "Restaurants & Food", "cake_shop": "Restaurants & Food",
+    "catering_service": "Restaurants & Food", "chocolate_factory": "Restaurants & Food",
+    "chocolate_shop": "Restaurants & Food", "coffee_roastery": "Restaurants & Food",
+    "coffee_shop": "Restaurants & Food", "confectionery": "Restaurants & Food", "deli": "Restaurants & Food",
+    "food": "Restaurants & Food", "food_store": "Restaurants & Food",
+    "hamburger_restaurant": "Restaurants & Food", "ice_cream_shop": "Restaurants & Food",
+    "indian_restaurant": "Restaurants & Food", "italian_restaurant": "Restaurants & Food",
+    "japanese_restaurant": "Restaurants & Food", "mexican_restaurant": "Restaurants & Food",
+    "pastry_shop": "Restaurants & Food", "pizza_restaurant": "Restaurants & Food",
+    "restaurant": "Restaurants & Food", "seafood_restaurant": "Restaurants & Food",
+    "sri_lankan_restaurant": "Restaurants & Food", "steak_house": "Restaurants & Food",
+    "thai_restaurant": "Restaurants & Food", "tea_store": "Restaurants & Food",
+    # Bars & Nightlife
+    "bar": "Bars & Nightlife", "brewery": "Bars & Nightlife", "brewpub": "Bars & Nightlife",
+    "gastropub": "Bars & Nightlife", "liquor_store": "Bars & Nightlife", "night_club": "Bars & Nightlife",
+    "pub": "Bars & Nightlife", "sports_bar": "Bars & Nightlife", "wine_bar": "Bars & Nightlife",
+    # Beauty & Wellness
+    "barber_shop": "Beauty & Wellness", "beautician": "Beauty & Wellness", "beauty_salon": "Beauty & Wellness",
+    "body_art_service": "Beauty & Wellness", "hair_care": "Beauty & Wellness", "hair_salon": "Beauty & Wellness",
+    "massage": "Beauty & Wellness", "nail_salon": "Beauty & Wellness", "tanning_studio": "Beauty & Wellness",
+    "wellness_center": "Beauty & Wellness", "yoga_studio": "Beauty & Wellness",
+    # Health & Fitness
+    "chiropractor": "Health & Fitness", "fitness_center": "Health & Fitness", "gym": "Health & Fitness",
+    "health": "Health & Fitness", "medical_center": "Health & Fitness", "medical_clinic": "Health & Fitness",
+    "physiotherapist": "Health & Fitness", "sports_complex": "Health & Fitness",
+    "sports_school": "Health & Fitness",
+    # Retail & Shopping
+    "auto_parts_store": "Retail & Shopping", "bicycle_store": "Retail & Shopping",
+    "book_store": "Retail & Shopping", "building_materials_store": "Retail & Shopping",
+    "butcher_shop": "Retail & Shopping", "clothing_store": "Retail & Shopping",
+    "department_store": "Retail & Shopping", "electronics_store": "Retail & Shopping",
+    "florist": "Retail & Shopping", "furniture_store": "Retail & Shopping",
+    "garden_center": "Retail & Shopping", "gift_shop": "Retail & Shopping",
+    "grocery_store": "Retail & Shopping", "home_goods_store": "Retail & Shopping",
+    "home_improvement_store": "Retail & Shopping", "jewelry_store": "Retail & Shopping",
+    "market": "Retail & Shopping", "pet_store": "Retail & Shopping",
+    "shoe_store": "Retail & Shopping", "sporting_goods_store": "Retail & Shopping",
+    "sportswear_store": "Retail & Shopping", "store": "Retail & Shopping",
+    "supermarket": "Retail & Shopping", "thrift_store": "Retail & Shopping",
+    "toy_store": "Retail & Shopping", "womens_clothing_store": "Retail & Shopping",
+    # Hospitality & Events
+    "event_venue": "Hospitality & Events", "hotel": "Hospitality & Events",
+    "lodging": "Hospitality & Events", "wedding_venue": "Hospitality & Events",
+    "tour_agency": "Hospitality & Events", "tourist_attraction": "Hospitality & Events",
+    "visitor_center": "Hospitality & Events",
+    # Arts & Entertainment
+    "art_gallery": "Arts & Entertainment", "art_studio": "Arts & Entertainment",
+    "performing_arts_theater": "Arts & Entertainment",
+    # Professional Services
+    "consultant": "Professional Services", "corporate_office": "Professional Services",
+    "general_contractor": "Professional Services", "laundry": "Professional Services",
+    "manufacturer": "Professional Services", "painter": "Professional Services",
+    "supplier": "Professional Services", "tailor": "Professional Services",
+    "wholesaler": "Professional Services", "storage": "Professional Services",
+    "service": "Professional Services",
+    # Education & Community
+    "child_care_agency": "Education & Community", "community_center": "Education & Community",
+    "local_government_office": "Education & Community", "non_profit_organization": "Education & Community",
+    "research_institute": "Education & Community", "school": "Education & Community",
+    "university": "Education & Community",
+    # Pets
+    "pet_boarding_service": "Pets", "pet_store": "Pets",
+    # Other
+    "apartment_building": "Other", "establishment": "Other", "farm": "Other",
+    "point_of_interest": "Other",
+}
+
+def get_industry(category):
+    if not category:
+        return "Other"
+    return CATEGORY_TO_INDUSTRY.get(category.lower().strip(), category.replace("_", " ").title())
+
+
 STAGES = ["New", "Contacted", "Demo Booked", "Proposal", "Won", "Lost"]
 REFERRAL_STAGES = ["New Referral", "Contacted", "Referral Signed Up", "Reward Sent"]
-PIPELINES = {
+POS_STAGES = ["New", "Onboarding", "Training", "Live", "Churned"]
+
+DEFAULT_PIPELINES = {
     "Sales": STAGES,
+    "POS Customers": POS_STAGES,
     "Referral": REFERRAL_STAGES,
 }
+
+PIPELINES_FILE = ROOT / "pipelines.json"
+
+def load_pipelines():
+    if PIPELINES_FILE.exists():
+        return json.loads(PIPELINES_FILE.read_text())
+    return DEFAULT_PIPELINES
+
+def save_pipelines(p):
+    PIPELINES_FILE.write_text(json.dumps(p, indent=2))
+
+PIPELINES = load_pipelines()  # initial load; also reloaded on rerun since module re-executes
 DEFAULT_TARGET = 20
 
 COLUMNS = [
     "id", "business_name", "contact_name", "phone", "email",
     "region", "category", "stage", "last_touch", "next_action_date",
-    "next_action", "notes", "source", "created", "pipeline",
+    "next_action", "notes", "source", "created", "pipeline", "deal_value",
 ]
 
 
@@ -330,7 +691,9 @@ def load_crm():
             if c not in df.columns:
                 df[c] = ""
         for c in df.columns:
-            df[c] = df[c].astype(str)
+            if c != "deal_value":
+                df[c] = df[c].astype(str)
+        df["deal_value"] = pd.to_numeric(df.get("deal_value", 0), errors="coerce").fillna(0)
         return df[COLUMNS]
     return pd.DataFrame(columns=COLUMNS)
 
@@ -361,7 +724,7 @@ def next_id(df):
     return str(df["id"].astype(int).max() + 1)
 
 
-def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales", default_stage="New"):
+def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales", default_stage="New", import_name=None):
     if not src_path.exists():
         return df, 0
     src = pd.read_csv(src_path, dtype=str).fillna("")
@@ -400,9 +763,10 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
             "next_action_date": None,
             "next_action": None,
             "notes": None,
-            "source": r.get("source", "ready_for_outreach") or None,
+            "source": (import_name or r.get("source", "ready_for_outreach")) or None,
             "created": date.today().isoformat(),
             "pipeline": pipeline,
+            "deal_value": 0,
         })
         nid += 1
     if rows:
@@ -440,37 +804,10 @@ input, textarea, select, [data-testid="stTextInput"] input,
 input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 3px rgba(124,58,237,0.1) !important; }
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] { background: #fff !important; border-radius: 12px !important; }
 
-/* ── Tabs ── */
-.stTabs [data-baseweb="tab-list"] {
-    background: #fff !important; border-radius: 12px !important;
-    padding: 4px !important; gap: 2px !important;
-    border: 1px solid #e2e4e9 !important; margin-bottom: 20px !important;
-}
-.stTabs [data-baseweb="tab"] {
-    color: #64748b !important; font-weight: 500 !important; font-size: 13px !important;
-    border-radius: 8px !important; padding: 8px 16px !important;
-    font-family: 'Inter', sans-serif !important;
-}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {
-    background: #7c3aed !important; color: #fff !important;
-}
-.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
-.stTabs [data-baseweb="tab-border"] { display: none !important; }
+/* ── Tabs (hidden — using sidebar nav) ── */
+.stTabs { display: none !important; }
 
-/* ── Buttons ── */
-.stButton > button {
-    border-radius: 8px !important; font-weight: 500 !important;
-    font-size: 13px !important; padding: 8px 16px !important;
-    border: 1px solid #e2e4e9 !important; background: #fff !important;
-    color: #1a1a2e !important; transition: all 0.15s !important;
-    font-family: 'Inter', sans-serif !important;
-}
-.stButton > button:hover { border-color: #7c3aed !important; color: #7c3aed !important; background: #faf5ff !important; }
-.stButton > button[kind="primary"], button[data-testid="stFormSubmitButton"] {
-    background: #7c3aed !important; color: #fff !important;
-    border-color: #7c3aed !important;
-}
-.stButton > button[kind="primary"]:hover { background: #6d28d9 !important; }
+/* ── Buttons (base — overridden by compact section below) ── */
 .stSelectbox > div > div { background: #fff !important; color: #1a1a2e !important; border-radius: 8px !important; }
 
 /* ── Header bar ── */
@@ -571,37 +908,73 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 .tmpl-preview .preview-subject { font-weight: 600; font-size: 15px; color: #1a1a2e; margin-bottom: 12px; }
 .tmpl-preview .preview-body { font-size: 13px; color: #64748b; white-space: pre-wrap; line-height: 1.7; }
 
-/* ── Profile card ── */
+/* ── Profile page — HubSpot-inspired ── */
 .profile-card {
-    background: #fff; border: 1px solid #e2e4e9; border-radius: 16px;
-    padding: 28px 24px; text-align: center;
+    background: #fff; border: 1px solid #e2e4e9; border-radius: 12px;
+    padding: 24px 20px; text-align: center;
     box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 .profile-avatar {
-    width: 80px; height: 80px; border-radius: 16px; background: linear-gradient(135deg, #7c3aed, #a78bfa);
-    color: #fff; font-size: 28px; font-weight: 700; line-height: 80px;
-    margin: 0 auto 16px; text-transform: uppercase; letter-spacing: 1px;
+    width: 72px; height: 72px; border-radius: 50%; background: linear-gradient(135deg, #7c3aed, #a78bfa);
+    color: #fff; font-size: 24px; font-weight: 700; line-height: 72px;
+    margin: 0 auto 12px; text-transform: uppercase; letter-spacing: 1px;
 }
-.profile-name { font-size: 20px; font-weight: 700; color: #1a1a2e; margin-bottom: 2px; }
-.profile-role { font-size: 13px; color: #64748b; margin-bottom: 4px; font-weight: 500; }
-.profile-email { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }
-.profile-actions { display: flex; justify-content: center; gap: 16px; margin: 16px 0; flex-wrap: wrap; }
-.profile-action-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.profile-name { font-size: 18px; font-weight: 700; color: #1a1a2e; margin-bottom: 2px; }
+.profile-role { font-size: 13px; color: #64748b; margin-bottom: 2px; font-weight: 500; }
+.profile-email { font-size: 12px; color: #94a3b8; margin-bottom: 14px; }
+.profile-actions { display: flex; justify-content: center; gap: 12px; margin: 14px 0 4px; flex-wrap: wrap; }
+.profile-action-item { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .profile-action-btn {
-    width: 42px; height: 42px; border-radius: 12px; border: 1px solid #e2e4e9;
-    background: #fff; color: #64748b; font-size: 16px; cursor: pointer;
+    width: 40px; height: 40px; border-radius: 50%; border: 1.5px solid #e2e4e9;
+    background: #fff; color: #64748b; font-size: 15px; cursor: pointer;
     display: inline-flex; align-items: center; justify-content: center;
     text-decoration: none; transition: all 0.15s;
 }
-.profile-action-btn:hover { background: #faf5ff; border-color: #7c3aed; color: #7c3aed; }
+.profile-action-btn:hover { background: #faf5ff; border-color: #7c3aed; color: #7c3aed; transform: translateY(-1px); }
 .profile-action-label { font-size: 10px; color: #94a3b8; font-weight: 500; }
-.profile-section { text-align: left; border-top: 1px solid #f1f5f9; padding-top: 16px; margin-top: 16px; }
-.profile-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.profile-section-title { font-size: 12px; font-weight: 600; color: #1a1a2e; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* About section */
+.profile-section { text-align: left; background: #fff; border: 1px solid #e2e4e9; border-radius: 12px; padding: 16px 20px; margin-top: 12px; }
+.profile-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid #f1f5f9; }
+.profile-section-title { font-size: 13px; font-weight: 700; color: #1a1a2e; text-transform: uppercase; letter-spacing: 0.3px; }
 .profile-section-action { font-size: 11px; color: #7c3aed; cursor: pointer; font-weight: 500; }
-.profile-field { margin-bottom: 12px; }
-.profile-field-label { font-size: 11px; color: #94a3b8; margin-bottom: 2px; font-weight: 500; }
+.profile-field { margin-bottom: 14px; display: flex; flex-direction: column; }
+.profile-field-label { font-size: 11px; color: #94a3b8; margin-bottom: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
 .profile-field-value { font-size: 13px; color: #1a1a2e; font-weight: 500; }
+
+/* Right sidebar cards */
+.profile-sidebar-card {
+    background: #fff; border: 1px solid #e2e4e9; border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px;
+}
+.profile-sidebar-card h4 {
+    font-size: 13px; font-weight: 700; color: #1a1a2e; margin: 0 0 12px 0;
+    text-transform: uppercase; letter-spacing: 0.3px;
+    padding-bottom: 8px; border-bottom: 1px solid #f1f5f9;
+}
+.profile-sidebar-card .sidebar-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; font-size: 12px;
+}
+.profile-sidebar-card .sidebar-row .label { color: #94a3b8; font-weight: 500; }
+.profile-sidebar-card .sidebar-row .value { color: #1a1a2e; font-weight: 600; }
+.profile-sidebar-card .sidebar-company {
+    display: flex; align-items: center; gap: 10px; padding: 8px 0;
+}
+.profile-sidebar-card .sidebar-company .company-icon {
+    width: 36px; height: 36px; border-radius: 8px; background: #f1f0ff;
+    color: #7c3aed; font-size: 14px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+}
+.profile-sidebar-card .sidebar-company .company-info { font-size: 13px; }
+.profile-sidebar-card .sidebar-company .company-name { font-weight: 600; color: #1a1a2e; }
+.profile-sidebar-card .sidebar-company .company-detail { font-size: 11px; color: #94a3b8; }
+
+/* Center activity panel */
+.profile-activity-header {
+    background: #fff; border: 1px solid #e2e4e9; border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 12px;
+}
 
 /* ── Timeline ── */
 .timeline { position: relative; padding-left: 28px; }
@@ -650,11 +1023,7 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
     display: inline-block; background: #f1f0ff; color: #7c3aed;
     font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
 }
-/* Compact buttons inside cards */
-[data-testid="stContainer"] .stButton > button {
-    padding: 4px 12px !important; font-size: 11px !important;
-    height: auto !important; min-height: 0 !important;
-}
+/* Card buttons — ultra compact (override in later block) */
 [data-testid="stContainer"] .stSelectbox { margin-top: -8px; }
 [data-testid="stContainer"] .stSelectbox > div > div {
     min-height: 0 !important; padding: 2px 8px !important; font-size: 11px !important;
@@ -665,18 +1034,359 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 hr { border-color: #e2e4e9 !important; }
 [data-testid="stForm"] { background: #fff !important; border: 1px solid #e2e4e9 !important; border-radius: 12px !important; padding: 24px !important; }
 .stMultiSelect > div { border-radius: 8px !important; }
+
+/* ── HIDE STREAMLIT CHROME ── */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+[data-testid="stToolbar"] { display: none !important; }
+header[data-testid="stHeader"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+div[data-testid="stStatusWidget"] { display: none !important; }
+
+/* ── SMOOTH TRANSITIONS EVERYWHERE ── */
+* { transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.1s ease, opacity 0.15s ease; }
+
+/* ── REDUCE TOP PADDING (no more wasted space) ── */
+.stApp > header { display: none !important; }
+[data-testid="stAppViewContainer"] > div:first-child { padding-top: 0 !important; }
+.block-container { padding-top: 1rem !important; padding-bottom: 0 !important; max-width: 100% !important; }
+
+/* ── SIDEBAR NAVIGATION ── */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f0f23 0%, #1a1a2e 100%) !important;
+    width: 240px !important;
+    min-width: 240px !important;
+    border-right: 1px solid #2d2d4a !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding-top: 16px !important; }
+section[data-testid="stSidebar"] .stRadio > label { display: none !important; }
+section[data-testid="stSidebar"] .stRadio > div {
+    flex-direction: column !important; gap: 2px !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label {
+    padding: 10px 16px !important; border-radius: 8px !important;
+    font-size: 13px !important; font-weight: 500 !important;
+    cursor: pointer !important; margin: 0 8px !important;
+    color: #a5a5c0 !important; transition: all 0.15s ease !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label:hover {
+    background: rgba(124, 58, 237, 0.1) !important; color: #fff !important;
+}
+section[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"],
+section[data-testid="stSidebar"] .stRadio > div > label:has(input:checked) {
+    background: rgba(124, 58, 237, 0.2) !important; color: #fff !important;
+    border-left: 3px solid #7c3aed !important;
+}
+
+/* ── DENSE LAYOUT ── */
+.stTabs [data-baseweb="tab-list"] { display: none !important; }
+.element-container { margin-bottom: 0.25rem !important; }
+[data-testid="stVerticalBlock"] > div { gap: 0.5rem !important; }
+
+/* ── STICKY HEADER ── */
+.crm-header {
+    position: sticky; top: 0; z-index: 999;
+    background: linear-gradient(135deg, #0f0f23 0%, #2d1b69 100%);
+    border-radius: 0; padding: 16px 24px; margin: -1rem -1rem 16px -1rem;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid #2d2d4a;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+}
+.crm-header .logo { font-size: 24px; font-weight: 700; color: #fff !important; letter-spacing: -0.5px; }
+.crm-header .logo span { color: #a78bfa !important; }
+.crm-header .subtitle { font-size: 12px; color: #a5a5c0 !important; margin-top: 0; }
+
+/* ── KPI CARDS - more compact ── */
+.kpi-bar { display: flex; gap: 12px; margin-bottom: 16px; }
+.kpi-card {
+    flex: 1; background: #fff; border: 1px solid #e2e4e9; border-radius: 10px;
+    padding: 14px 16px; text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
+.kpi-card .num { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.kpi-card .label { font-size: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 2px; font-weight: 600; }
+
+/* ── KANBAN - tighter cards ── */
+.kanban-header {
+    padding: 10px 12px; font-weight: 600; font-size: 11px;
+    border-bottom: 3px solid; text-transform: uppercase; letter-spacing: 0.8px;
+    background: #fff; border-radius: 10px 10px 0 0;
+    position: sticky; top: 70px; z-index: 10;
+}
+.deal-card-inner { padding: 2px 0; }
+.deal-card-inner .biz { font-weight: 600; font-size: 12px; color: #1a1a2e; margin-bottom: 2px; }
+.deal-card-inner .contact { font-size: 11px; color: #64748b; }
+.deal-card-inner .meta { font-size: 10px; color: #94a3b8; margin-top: 4px; }
+
+/* ── CONTAINERS - tighter padding ── */
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"] {
+    border: 1px solid #e8e8ee !important; border-radius: 8px !important;
+    padding: 8px 10px 4px !important; margin-bottom: 6px !important;
+    background: #fff !important;
+}
+[data-testid="stVerticalBlock"] > div[data-testid="stContainer"]:hover {
+    box-shadow: 0 2px 8px rgba(124,58,237,0.08); border-color: #c4b5fd !important;
+}
+
+/* ── BUTTONS - clear, visible, professional ── */
+.stButton > button {
+    border-radius: 8px !important; font-weight: 600 !important;
+    font-size: 13px !important; padding: 8px 18px !important;
+    border: 1.5px solid #d4d4d8 !important; background: #fff !important;
+    color: #1a1a2e !important; font-family: 'Inter', sans-serif !important;
+    cursor: pointer !important; box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+    transition: all 0.15s ease !important;
+}
+.stButton > button:hover {
+    border-color: #7c3aed !important; color: #7c3aed !important;
+    background: #faf5ff !important; box-shadow: 0 2px 6px rgba(124,58,237,0.12) !important;
+    transform: translateY(-1px);
+}
+.stButton > button:active { transform: scale(0.97) translateY(0); }
+.stButton > button[kind="primary"], button[data-testid="stFormSubmitButton"] {
+    background: linear-gradient(135deg, #7c3aed, #6d28d9) !important;
+    color: #fff !important; border-color: #7c3aed !important;
+    box-shadow: 0 2px 8px rgba(124,58,237,0.25) !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #6d28d9, #5b21b6) !important;
+    box-shadow: 0 4px 12px rgba(124,58,237,0.35) !important;
+}
+/* Card buttons stay compact */
+[data-testid="stContainer"] .stButton > button {
+    padding: 2px 8px !important; font-size: 10px !important;
+    height: 24px !important; min-height: 0 !important;
+    font-weight: 500 !important; box-shadow: none !important;
+}
+
+/* ── INPUTS - compact ── */
+input, textarea, select, [data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background-color: #fff !important; color: #1a1a2e !important;
+    border: 1px solid #e2e4e9 !important; border-radius: 6px !important;
+    font-family: 'Inter', sans-serif !important; font-size: 13px !important;
+}
+input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 0 2px rgba(124,58,237,0.08) !important; }
+
+/* ── CONTACT TABLE - hover row highlight ── */
+.contact-table tr { transition: background 0.1s; }
+.contact-table tr:hover td { background: #faf5ff; cursor: pointer; }
+.contact-table td { padding: 10px 14px; font-size: 12px; }
+.contact-table th { padding: 10px 14px; font-size: 10px; }
+
+/* ── TIMELINE - tighter ── */
+.timeline { padding-left: 24px; }
+.timeline-item { margin-bottom: 14px; }
+.timeline-dot { left: -20px; top: 3px; width: 12px; height: 12px; }
+.timeline-body { font-size: 11px; padding: 10px 14px; max-height: 150px; }
+
+/* ── TOAST-STYLE NOTIFICATIONS ── */
+[data-testid="stAlert"] {
+    border-radius: 8px !important; font-size: 13px !important;
+    padding: 10px 16px !important; border-left: 4px solid !important;
+    animation: slideIn 0.2s ease-out;
+}
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── SKELETON LOADING FEEL ── */
+[data-testid="stSpinner"] > div {
+    background: #f8f9fb; border-radius: 8px; padding: 20px;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+
+/* ── DATA EDITOR / TABLES ── */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    background: #fff !important; border-radius: 8px !important;
+    border: 1px solid #e2e4e9 !important;
+}
+
+/* ── EXPANDER ── */
+[data-testid="stExpander"] {
+    background: #fff !important; border: 1px solid #e2e4e9 !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] summary { font-size: 13px !important; font-weight: 500 !important; }
+
+/* ── SELECTBOX ── */
+.stSelectbox > div > div { background: #fff !important; border-radius: 6px !important; font-size: 13px !important; }
+[data-testid="stContainer"] .stSelectbox { margin-top: -4px; }
+[data-testid="stContainer"] .stSelectbox > div > div {
+    min-height: 0 !important; padding: 2px 8px !important; font-size: 10px !important;
+}
+
+/* ── MULTISELECT ── */
+.stMultiSelect > div { border-radius: 6px !important; }
+
+/* ── COMMAND PALETTE ── */
+.cmd-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);
+    z-index: 99999; justify-content: center; padding-top: 15vh;
+    animation: fadeIn 0.1s ease-out;
+}
+.cmd-overlay.active { display: flex; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.cmd-palette {
+    background: #fff; border-radius: 14px; width: 560px; max-height: 420px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.25); overflow: hidden;
+    animation: cmdSlideIn 0.15s ease-out;
+}
+@keyframes cmdSlideIn { from { opacity: 0; transform: translateY(-12px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.cmd-input-wrap {
+    display: flex; align-items: center; padding: 14px 20px;
+    border-bottom: 1px solid #e2e4e9; gap: 10px;
+}
+.cmd-input-wrap .cmd-icon { color: #94a3b8; font-size: 18px; }
+.cmd-input {
+    flex: 1; border: none !important; outline: none !important;
+    font-size: 15px !important; font-family: 'Inter', sans-serif !important;
+    color: #1a1a2e !important; background: transparent !important;
+    box-shadow: none !important; padding: 0 !important;
+}
+.cmd-input::placeholder { color: #c4c4d4; }
+.cmd-hint { font-size: 11px; color: #c4c4d4; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
+.cmd-results { max-height: 320px; overflow-y: auto; padding: 8px; }
+.cmd-item {
+    display: flex; align-items: center; padding: 10px 14px; border-radius: 8px;
+    cursor: pointer; gap: 12px; transition: background 0.1s;
+}
+.cmd-item:hover, .cmd-item.selected { background: #f5f3ff; }
+.cmd-item-icon { font-size: 16px; width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: #f1f5f9; }
+.cmd-item-text { flex: 1; }
+.cmd-item-title { font-size: 13px; font-weight: 500; color: #1a1a2e; }
+.cmd-item-sub { font-size: 11px; color: #94a3b8; }
+.cmd-item-badge { font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 500; }
+.cmd-empty { padding: 32px; text-align: center; color: #94a3b8; font-size: 13px; }
+.cmd-footer {
+    border-top: 1px solid #e2e4e9; padding: 8px 16px; display: flex;
+    gap: 16px; background: #f8f9fb; border-radius: 0 0 14px 14px;
+}
+.cmd-footer-item { font-size: 10px; color: #94a3b8; display: flex; align-items: center; gap: 4px; }
+.cmd-footer-item kbd {
+    background: #e2e4e9; padding: 1px 5px; border-radius: 3px; font-size: 10px;
+    font-family: monospace; color: #64748b;
+}
+
+/* ── KEYBOARD SHORTCUT HINTS ── */
+.kbd-hint {
+    position: fixed; bottom: 16px; right: 16px; z-index: 9998;
+    background: #1a1a2e; color: #a5a5c0; padding: 8px 14px; border-radius: 8px;
+    font-size: 11px; font-family: 'Inter', sans-serif;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2); display: flex; gap: 16px;
+}
+.kbd-hint kbd { background: #2d2d4a; padding: 1px 6px; border-radius: 3px; color: #fff; font-family: monospace; }
 </style>
 """
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳")
+st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳", initial_sidebar_state="expanded")
 st.markdown(HUBSPOT_CSS, unsafe_allow_html=True)
-st.markdown("""<div class="crm-header">
-    <div><div class="logo">JOE'S <span>CRM</span></div>
-    <div class="subtitle">Yetipay Sales Pipeline &amp; Outreach Manager</div></div>
+# Command palette JS can't run in st.markdown (Streamlit strips <script> tags)
+# Using keyboard hint CSS only — the global search bar at top serves as command palette
+
+# ─── Sidebar Navigation (must be before header that uses nav_choice) ─────────
+NAV_ITEMS = ["📊 Pipeline", "👥 Contacts", "📅 Today", "✉️ Outreach", "🔄 Follow Up",
+             "✅ Tasks", "🔗 Sequences", "📈 Reports", "➕ Add Lead", "📥 Import", "📝 Templates", "⚙️ Settings"]
+
+# Restore nav from URL query param on refresh
+_qp = st.query_params
+_default_nav_idx = 0
+if "page" in _qp:
+    _page_from_url = _qp["page"]
+    for _i, _item in enumerate(NAV_ITEMS):
+        if _page_from_url in _item.lower() or _page_from_url == _item:
+            _default_nav_idx = _i
+            break
+
+with st.sidebar:
+    st.markdown(f"""<div style="padding:8px 16px 20px;border-bottom:1px solid #2d2d4a;margin-bottom:12px;">
+        <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-0.5px;">JOE'S <span style="color:#a78bfa;">CRM</span></div>
+        <div style="font-size:11px;color:#64648a;margin-top:2px;">{date.today().strftime('%A, %d %b %Y')}</div>
+    </div>""", unsafe_allow_html=True)
+    def _nav_changed():
+        st.session_state["view_lead_id"] = None
+    nav_choice = st.radio("Navigation", NAV_ITEMS, index=_default_nav_idx, key="nav", label_visibility="collapsed", on_change=_nav_changed)
+
+# Sync nav choice back to URL so refresh preserves page
+st.query_params["page"] = nav_choice
+
+# Header — thin top bar for context
+st.markdown(f"""<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 12px;border-bottom:1px solid #e2e4e9;margin-bottom:16px;">
+    <div style="font-size:16px;font-weight:700;color:#1a1a2e;">{nav_choice}</div>
+    <div style="font-size:12px;color:#94a3b8;">{date.today().strftime('%A, %d %B %Y')}</div>
 </div>""", unsafe_allow_html=True)
 cfg = load_config()
 df = load_crm()
+
+# Pre-compute lead scores and duplicates (cached per session)
+if "lead_scores" not in st.session_state or st.session_state.get("_score_stale", True):
+    _act_for_scoring = load_activity()
+    _scores = {}
+    for _, _row in df.iterrows():
+        _scores[str(_row["id"])] = score_lead(_row.to_dict(), _act_for_scoring)
+    st.session_state["lead_scores"] = _scores
+    st.session_state["_score_stale"] = False
+
+if "duplicates" not in st.session_state or st.session_state.get("_dupes_stale", True):
+    st.session_state["duplicates"] = detect_duplicates(df)
+    st.session_state["_dupes_stale"] = False
+
+LEAD_SCORES = st.session_state["lead_scores"]
+DUPLICATES = st.session_state["duplicates"]
+
+# Quick stats in sidebar
+with st.sidebar:
+    st.markdown(f"""<div style="border-top:1px solid #2d2d4a;padding:12px 16px;margin-top:8px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:11px;color:#64648a;">Pipeline</span>
+            <span style="font-size:11px;color:#a78bfa;font-weight:600;">{len(df[~df['stage'].isin(['Won','Lost'])])} active</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:11px;color:#64648a;">Won</span>
+            <span style="font-size:11px;color:#10b981;font-weight:600;">{len(df[df['stage']=='Won'])}/{cfg['target']}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:11px;color:#64648a;">Today's emails</span>
+            <span style="font-size:11px;color:#fff;font-weight:600;">{sum(load_send_counts()['counts'].values())}</span>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+# Stale lead alerts (sidebar)
+_stale_leads = []
+for _, _r in df[df["stage"].isin(["Contacted", "Demo Booked", "Proposal"])].iterrows():
+    _ds = days_since_touch(_r.to_dict())
+    if _ds and _ds >= 7:
+        _stale_leads.append((_r["business_name"], _r["stage"], _ds, _r["id"]))
+_stale_leads.sort(key=lambda x: -x[2])
+
+if _stale_leads:
+    with st.sidebar:
+        st.markdown(f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:12px;">'
+                    f'<div style="font-weight:700;color:#ef4444;font-size:14px;">⚠️ {len(_stale_leads)} Stale Leads</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">No activity 7+ days</div></div>', unsafe_allow_html=True)
+        for _biz, _stg, _days, _lid in _stale_leads[:10]:
+            st.sidebar.button(f"🔴 {_biz} ({_days}d)", key=f"stale_{_lid}", on_click=lambda lid=_lid: st.session_state.update({"view_lead_id": str(lid)}))
+
+if DUPLICATES:
+    with st.sidebar:
+        n_dupes = len(DUPLICATES)
+        st.markdown(f'<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:12px;">'
+                    f'<div style="font-weight:700;color:#d97706;font-size:14px;">⚠️ {n_dupes} Duplicate Leads</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">Same email or business name</div></div>', unsafe_allow_html=True)
 
 # Initialise profile view state
 if "view_lead_id" not in st.session_state:
@@ -691,42 +1401,64 @@ def close_profile():
     st.session_state["view_lead_id"] = None
 
 
-# ─── Global search bar ─────────────────────────────────────────────────────
+# ─── Global search bar (shown on pipeline + contacts) ──────────────────────
 gs1, gs2 = st.columns([3, 1])
 global_search = gs1.text_input("🔍 Search leads by name, email, phone, or business", key="global_search", label_visibility="collapsed", placeholder="Search leads by name, email, phone, or business...")
 if global_search and not df.empty:
     m = (df["business_name"].str.contains(global_search, case=False, na=False)
          | df["email"].str.contains(global_search, case=False, na=False)
          | df["contact_name"].str.contains(global_search, case=False, na=False)
-         | df["phone"].str.contains(global_search, case=False, na=False))
+         | df["phone"].str.contains(global_search, case=False, na=False)
+         | df["notes"].str.contains(global_search, case=False, na=False))
     results = df[m].head(10)
     if results.empty:
-        st.caption("No results")
+        st.caption("No lead results")
     else:
+        st.markdown("**Leads**")
         for _, r in results.iterrows():
             rc1, rc2, rc3, rc4 = st.columns([2, 2, 1, 1])
             rc1.write(f"**{r['business_name']}** — {r['contact_name']}")
             rc2.write(r["email"])
             rc3.write(r["stage"])
             rc4.button("View", key=f"gs_{r['id']}", on_click=open_profile, args=(r["id"],))
-        st.divider()
+
+    # Search activities too
+    act_df = load_activity()
+    if not act_df.empty:
+        am = (act_df["subject"].str.contains(global_search, case=False, na=False)
+              | act_df["content"].str.contains(global_search, case=False, na=False)
+              | act_df["business_name"].str.contains(global_search, case=False, na=False))
+        act_results = act_df[am].head(5)
+        if not act_results.empty:
+            st.markdown("**Activity matches**")
+            for _, a in act_results.iterrows():
+                ac1, ac2, ac3 = st.columns([2, 3, 1])
+                ac1.write(f"**{a['business_name']}** · {a['type']}")
+                ac2.caption(f"{a['subject']} — {a['timestamp'][:10]}")
+                ac3.button("View", key=f"gs_act_{a['id']}", on_click=open_profile, args=(str(a["lead_id"]),))
+
+    st.divider()
 
 # KPI bar
 won = len(df[df["stage"] == "Won"])
 target = cfg["target"]
 remaining = max(target - won, 0)
-days_left = (date(date.today().year, date.today().month % 12 + 1, 1) - date.today()).days
+_next_month_year = date.today().year + (1 if date.today().month == 12 else 0)
+days_left = (date(_next_month_year, date.today().month % 12 + 1, 1) - date.today()).days
 in_pipe = len(df[~df["stage"].isin(["Won", "Lost"])])
 pct = min(won / target, 1.0) if target else 0
 
 contacted = len(df[df["stage"] == "Contacted"])
+pipeline_rev = df[~df["stage"].isin(["Won", "Lost"])]["deal_value"].sum()
+won_rev = df[df["stage"] == "Won"]["deal_value"].sum()
 st.markdown(f"""
 <div class="kpi-bar">
     <div class="kpi-card" style="background:#ecfdf5; border-color:#d1fae5;"><div class="num" style="color:#059669;">{won}/{target}</div><div class="label">Deals Won</div><div class="sub">{pct*100:.0f}% of target</div></div>
+    <div class="kpi-card" style="background:#ecfdf5; border-color:#d1fae5;"><div class="num" style="color:#059669;">£{won_rev:,.0f}</div><div class="label">Won Revenue</div></div>
+    <div class="kpi-card" style="background:#f5f3ff; border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">£{pipeline_rev:,.0f}</div><div class="label">Pipeline Value</div></div>
     <div class="kpi-card" style="background:#fef3c7; border-color:#fde68a;"><div class="num" style="color:#d97706;">{remaining}</div><div class="label">To Go</div></div>
     <div class="kpi-card" style="background:#fef2f2; border-color:#fecaca;"><div class="num" style="color:#dc2626;">{days_left}</div><div class="label">Days Left</div></div>
     <div class="kpi-card" style="background:#eff6ff; border-color:#bfdbfe;"><div class="num" style="color:#2563eb;">{contacted}</div><div class="label">Contacted</div></div>
-    <div class="kpi-card" style="background:#f5f3ff; border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">{in_pipe:,}</div><div class="label">In Pipeline</div></div>
     <div class="kpi-card" style="background:#f8f9fb; border-color:#e2e4e9;"><div class="num">{len(df):,}</div><div class="label">Total Leads</div></div>
 </div>
 <div class="target-bar"><div class="target-fill" style="width:{pct*100:.0f}%"></div></div>
@@ -746,17 +1478,28 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     templates = load_templates()
     esc = html_mod.escape
 
-    st.button("← Back to CRM", on_click=close_profile)
+    # ── Top bar: breadcrumb + back ──
+    _bc1, _bc2 = st.columns([1.5, 5])
+    _bc1.button("← Back to list", on_click=close_profile, key="pv_back", type="primary")
+    _bc2.markdown(f"""<div style="display:flex;align-items:center;gap:8px;padding:10px 0;">
+        <span style="font-size:12px;color:#94a3b8;">Contacts</span>
+        <span style="font-size:12px;color:#94a3b8;">›</span>
+        <span style="font-size:13px;color:#1a1a2e;font-weight:600;">{html_mod.escape(lead['contact_name'] or 'Unknown')}</span>
+    </div>""", unsafe_allow_html=True)
 
-    sidebar, main = st.columns([1, 2])
+    # ── 3 column layout: left sidebar | center activity | right sidebar ──
+    left_col, center_col, right_col = st.columns([1.2, 2.5, 1.3])
 
-    with sidebar:
-        initials = "".join(w[0] for w in (lead["contact_name"] or "?").split()[:2]).upper() or "?"
-        pill_cls = PILL_MAP.get(lead["stage"], "stage-pill-new")
-        name_parts = (lead["contact_name"] or "").split()
-        first_name = name_parts[0] if name_parts else "--"
-        last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "--"
+    initials = "".join(w[0] for w in (lead["contact_name"] or "?").split()[:2]).upper() or "?"
+    pill_cls = PILL_MAP.get(lead["stage"], "stage-pill-new")
+    name_parts = (lead["contact_name"] or "").split()
+    first_name = name_parts[0] if name_parts else "--"
+    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else "--"
+    _lead_county = get_county(lead.get("region"))
+    _lead_industry = get_industry(lead.get("category"))
 
+    # ━━━ LEFT COLUMN: Contact card + About ━━━
+    with left_col:
         phone_href = f'<a href="tel:{esc(lead["phone"])}" class="profile-action-btn">📞</a>' if lead["phone"] else '<span class="profile-action-btn" style="opacity:0.3">📞</span>'
         email_href = f'<a href="mailto:{esc(lead["email"])}" class="profile-action-btn">✉️</a>' if lead["email"] else '<span class="profile-action-btn" style="opacity:0.3">✉️</span>'
 
@@ -781,15 +1524,13 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div class="profile-field"><div class="profile-field-label">Phone</div><div class="profile-field-value">{esc(lead['phone'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Company</div><div class="profile-field-value">{esc(lead['business_name'])}</div></div>
             <div class="profile-field"><div class="profile-field-label">Stage</div><div class="profile-field-value"><span class="contact-stage {pill_cls}">{esc(lead['stage'])}</span></div></div>
-            <div class="profile-field"><div class="profile-field-label">Category</div><div class="profile-field-value">{esc(lead['category'] or '--')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Region</div><div class="profile-field-value">{esc(lead['region'] or '--')}</div></div>
+            <div class="profile-field"><div class="profile-field-label">Industry</div><div class="profile-field-value">{esc(_lead_industry)}</div></div>
+            <div class="profile-field"><div class="profile-field-label">County</div><div class="profile-field-value">{esc(_lead_county)}</div></div>
             <div class="profile-field"><div class="profile-field-label">Source</div><div class="profile-field-value">{esc(lead['source'] or '--')}</div></div>
             <div class="profile-field"><div class="profile-field-label">Created</div><div class="profile-field-value">{esc(lead['created'] or '--')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Last touch</div><div class="profile-field-value">{esc(lead['last_touch'] or 'Never')}</div></div>
-            <div class="profile-field"><div class="profile-field-label">Notes</div><div class="profile-field-value">{esc(lead['notes'] or '--')}</div></div>
         </div>""", unsafe_allow_html=True)
 
-        with st.expander("Edit contact"):
+        with st.expander("✏️ Edit contact"):
             new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
             new_phone = st.text_input("Phone", lead["phone"], key="pv_phone")
             new_email = st.text_input("Email", lead["email"], key="pv_email")
@@ -804,17 +1545,64 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                     pass
             new_nad = st.date_input("Next action date", value=nad_val, key="pv_nad")
             new_na = st.text_input("Next action", lead["next_action"], key="pv_na")
+            new_deal_value = st.number_input("Deal value (£)", value=float(lead.get("deal_value") or 0), min_value=0.0, step=50.0, key="pv_deal")
             new_notes = st.text_area("Notes", lead["notes"], height=80, key="pv_notes")
             if st.button("Save", type="primary", key="pv_save"):
                 save_lead(lead_id, {
                     "contact_name": new_contact, "phone": new_phone, "email": new_email,
                     "stage": new_stage, "next_action_date": new_nad.isoformat() if new_nad else "",
-                    "next_action": new_na, "notes": new_notes,
+                    "next_action": new_na, "notes": new_notes, "deal_value": new_deal_value,
                 })
                 st.rerun()
 
-    with main:
-        act_tab = st.radio("", ["Email", "Call / Note", "Timeline"], horizontal=True, key="pv_action_tab")
+    # ━━━ RIGHT COLUMN: Deal, Company, Score ━━━
+    with right_col:
+        _deal_val = lead.get("deal_value", 0) or 0
+        _score, _score_label, _score_color = LEAD_SCORES.get(lead_id, (0, "🧊 Cold", "#94a3b8"))
+        _biz_initials = "".join(w[0] for w in (lead["business_name"] or "?").split()[:2]).upper()
+
+        # Deal card
+        st.markdown(f"""<div class="profile-sidebar-card">
+            <h4>Deal</h4>
+            <div class="sidebar-row"><span class="label">Value</span><span class="value" style="color:#059669;">£{_deal_val:,.0f}</span></div>
+            <div class="sidebar-row"><span class="label">Pipeline</span><span class="value">{esc(lead.get('pipeline') or 'Sales')}</span></div>
+            <div class="sidebar-row"><span class="label">Stage</span><span class="value"><span class="contact-stage {pill_cls}">{esc(lead['stage'])}</span></span></div>
+            <div class="sidebar-row"><span class="label">Next action</span><span class="value">{esc(lead.get('next_action') or '--')}</span></div>
+            <div class="sidebar-row"><span class="label">Next date</span><span class="value">{esc(lead.get('next_action_date') or '--')}</span></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Company card
+        st.markdown(f"""<div class="profile-sidebar-card">
+            <h4>Company</h4>
+            <div class="sidebar-company">
+                <div class="company-icon">{esc(_biz_initials)}</div>
+                <div class="company-info">
+                    <div class="company-name">{esc(lead['business_name'])}</div>
+                    <div class="company-detail">{esc(_lead_industry)} · {esc(_lead_county)}</div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Lead score card
+        st.markdown(f"""<div class="profile-sidebar-card">
+            <h4>Lead Score</h4>
+            <div style="text-align:center;padding:8px 0;">
+                <div style="font-size:28px;font-weight:800;color:{_score_color};">{_score}</div>
+                <div style="font-size:13px;color:{_score_color};font-weight:600;">{_score_label}</div>
+            </div>
+            <div class="sidebar-row"><span class="label">Last touch</span><span class="value">{esc(lead['last_touch'] or 'Never')}</span></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Notes card
+        _notes_preview = (lead.get("notes") or "--")[:200]
+        st.markdown(f"""<div class="profile-sidebar-card">
+            <h4>Notes</h4>
+            <div style="font-size:12px;color:#64748b;white-space:pre-wrap;line-height:1.5;">{esc(_notes_preview)}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # ━━━ CENTER COLUMN: Activity tabs ━━━
+    with center_col:
+        act_tab = st.radio("", ["Email", "Call / Note", "Tasks", "Timeline"], horizontal=True, key="pv_action_tab")
 
         if act_tab == "Email":
             tmpl_names = list(templates.keys())
@@ -857,12 +1645,68 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                 else:
                     st.error("Add subject or details")
 
+        elif act_tab == "Tasks":
+            lead_tasks = load_tasks(lead_id)
+            pending = [t for t in lead_tasks if t.get("status") == "pending"]
+            done = [t for t in lead_tasks if t.get("status") == "done"]
+
+            st.markdown("**Add task**")
+            tc1, tc2, tc3 = st.columns([3, 2, 1])
+            t_title = tc1.text_input("Task", key="pv_task_title", placeholder="e.g. Call back Thursday", label_visibility="collapsed")
+            t_due = tc2.date_input("Due", value=None, key="pv_task_due", label_visibility="collapsed")
+            t_assigned = tc3.selectbox("Assign", [s["name"] for s in SENDERS], key="pv_task_assign", label_visibility="collapsed")
+            if st.button("Add task", type="primary", key="pv_task_add"):
+                if t_title:
+                    create_task(lead_id, t_title, due_date=t_due.isoformat() if t_due else None, assigned_to=t_assigned)
+                    st.rerun()
+
+            if pending:
+                st.markdown("**Pending**")
+                for t in pending:
+                    tc1, tc2, tc3 = st.columns([4, 2, 1])
+                    overdue = ""
+                    if t.get("due_date"):
+                        try:
+                            if date.fromisoformat(str(t["due_date"])) < date.today():
+                                overdue = " 🔴"
+                        except Exception:
+                            pass
+                    tc1.markdown(f"**{t['title']}**{overdue}")
+                    tc2.caption(f"Due: {t.get('due_date', '--')} · {t.get('assigned_to', '')}")
+                    if tc3.button("✅", key=f"pv_tdone_{t['id']}"):
+                        update_task(t["id"], {"status": "done"})
+                        st.rerun()
+
+            if done:
+                with st.expander(f"Completed ({len(done)})"):
+                    for t in done:
+                        st.caption(f"~~{t['title']}~~ — {t.get('due_date', '')}")
+
+            if not pending and not done:
+                st.markdown("""<div style="text-align:center;padding:20px 12px;">
+                    <div style="font-size:28px;margin-bottom:6px;">📝</div>
+                    <div style="font-size:12px;color:#94a3b8;">No tasks yet. Add one above.</div>
+                </div>""", unsafe_allow_html=True)
+
         elif act_tab == "Timeline":
+            if lead["email"] and st.button("🔄 Refresh from Gmail", key="pv_gmail_refresh"):
+                with st.spinner("Fetching emails..."):
+                    count = fetch_gmail_for_contact(lead["email"])
+                if count is not None:
+                    st.success(f"Found {count} emails")
+                    st.rerun()
+                else:
+                    st.error("Gmail fetch failed. Run `python3 gmail_auth.py` first.")
             timeline_items = []
             act_df = load_activity()
             lead_act = act_df[act_df["lead_id"] == str(lead_id)]
             for _, r in lead_act.iterrows():
                 timeline_items.append({"timestamp": r["timestamp"], "type": r["type"], "title": r["subject"] or r["type"].title(), "body": r["content"], "source": "crm"})
+
+            # Include tasks in timeline
+            for t in load_tasks(lead_id):
+                status_label = "✅ " if t.get("status") == "done" else "⏳ "
+                timeline_items.append({"timestamp": t.get("created_at", ""), "type": "task", "title": f"{status_label}{t['title']}", "body": f"Due: {t.get('due_date', '--')} · {t.get('assigned_to', '')}", "source": "crm"})
 
             cached_gmail = load_gmail_cache(lead["email"]) if lead["email"] else None
             if cached_gmail:
@@ -875,7 +1719,11 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             timeline_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
             if not timeline_items:
-                st.caption("No activity yet. Send an email or log a call to start the timeline.")
+                st.markdown("""<div style="text-align:center;padding:32px 16px;">
+                    <div style="font-size:36px;margin-bottom:8px;">📭</div>
+                    <div style="font-size:14px;font-weight:600;color:#1a1a2e;">No activity yet</div>
+                    <div style="font-size:12px;color:#94a3b8;">Send an email or log a call to start the timeline.</div>
+                </div>""", unsafe_allow_html=True)
             else:
                 current_month = ""
                 st.markdown('<div class="timeline">', unsafe_allow_html=True)
@@ -885,13 +1733,19 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                         month_label = dt.strftime("%B %Y")
                         date_label = dt.strftime("%b %d, %Y %H:%M")
                     except Exception:
-                        month_label = ""
-                        date_label = item["timestamp"][:10] if item["timestamp"] else ""
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            dt = parsedate_to_datetime(item["timestamp"])
+                            month_label = dt.strftime("%B %Y")
+                            date_label = dt.strftime("%b %d, %Y %H:%M")
+                        except Exception:
+                            month_label = ""
+                            date_label = item["timestamp"][:10] if item["timestamp"] else ""
                     if month_label and month_label != current_month:
                         current_month = month_label
                         st.markdown(f'<div class="timeline-month">{esc(month_label)}</div>', unsafe_allow_html=True)
-                    dot_cls = {"email": "timeline-dot-email", "call": "timeline-dot-call", "note": "timeline-dot-note", "gmail": "timeline-dot-gmail"}.get(item["type"], "timeline-dot-note")
-                    type_label = {"email": "Email logged", "call": "Call logged", "note": "Note", "gmail": "Gmail"}.get(item["type"], item["type"])
+                    dot_cls = {"email": "timeline-dot-email", "call": "timeline-dot-call", "note": "timeline-dot-note", "gmail": "timeline-dot-gmail", "task": "timeline-dot-note"}.get(item["type"], "timeline-dot-note")
+                    type_label = {"email": "Email logged", "call": "Call logged", "note": "Note", "gmail": "Gmail", "task": "Task"}.get(item["type"], item["type"])
                     body_html = f'<div class="timeline-body">{esc(item["body"][:500])}</div>' if item["body"] else ""
                     st.markdown(f"""<div class="timeline-item">
                         <div class="timeline-dot {dot_cls}"></div>
@@ -901,18 +1755,50 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                     </div>""", unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
+                # AI Analysis button for received emails
+                received_emails = [item for item in timeline_items if item.get("type") == "gmail" and "Received" in item.get("title", "")]
+                if received_emails:
+                    st.divider()
+                    st.markdown("**🤖 AI Email Analysis**")
+                    if st.button("Analyze latest reply with AI", key="pv_ai_analyze"):
+                        latest = received_emails[0]
+                        with st.spinner("Analyzing with Claude..."):
+                            analysis = analyze_email_ai(latest.get("body", ""), lead.get("business_name", ""))
+                        if analysis:
+                            sentiment_colors = {"positive": "#10b981", "neutral": "#f59e0b", "negative": "#ef4444"}
+                            s_color = sentiment_colors.get(analysis.get("sentiment", ""), "#94a3b8")
+                            st.markdown(f"""<div style="background:#f8f9fb;border:1px solid #e2e4e9;border-radius:12px;padding:16px;margin-top:8px;">
+                                <div style="display:flex;gap:12px;margin-bottom:8px;">
+                                    <span style="background:{s_color}20;color:{s_color};padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Sentiment: {analysis.get('sentiment','?')}</span>
+                                    <span style="background:#eff6ff;color:#3b82f6;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Intent: {analysis.get('intent','?')}</span>
+                                    <span style="background:#f5f3ff;color:#7c3aed;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:600;">Urgency: {analysis.get('urgency','?')}</span>
+                                </div>
+                                <div style="font-size:13px;color:#1a1a2e;margin-bottom:4px;"><strong>Summary:</strong> {html_mod.escape(analysis.get('summary',''))}</div>
+                                <div style="font-size:13px;color:#7c3aed;"><strong>Suggested action:</strong> {html_mod.escape(analysis.get('suggested_action',''))}</div>
+                            </div>""", unsafe_allow_html=True)
+                        else:
+                            st.warning("AI analysis unavailable. Set ANTHROPIC_API_KEY in .env")
+
+    st.markdown("---")
+    st.button("← Back to list", on_click=close_profile, key="pv_back_bottom", type="primary")
     st.stop()
 
-# ─── Tabs (normal view) ───────────────────────────────────────────────────
-tab_pipeline, tab_contacts, tab_lead, tab_today, tab_bulk, tab_sequences, tab_charts, tab_add, tab_import, tab_templates, tab_settings = st.tabs(
-    ["Pipeline", "Contacts", "Lead Detail", "Today", "Outreach", "Sequences", "Reports", "Add Lead", "Import", "Templates", "Settings"]
-)
+# ─── Page routing via sidebar nav ─────────────────────────────────────────
+# Map nav labels to page keys
+_NAV_MAP = {
+    "📊 Pipeline": "pipeline", "👥 Contacts": "contacts", "📅 Today": "today",
+    "✉️ Outreach": "outreach", "🔄 Follow Up": "followup", "✅ Tasks": "tasks",
+    "📈 Reports": "reports", "🔗 Sequences": "sequences", "➕ Add Lead": "add",
+    "📥 Import": "import", "📝 Templates": "templates", "⚙️ Settings": "settings",
+}
+_active_page = _NAV_MAP.get(nav_choice, "pipeline")
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
 STAGE_CLASSES = {
     "New": "stage-new", "Contacted": "stage-contacted", "Demo Booked": "stage-demo",
     "Proposal": "stage-proposal", "Won": "stage-won", "Lost": "stage-lost",
     "New Referral": "stage-new", "Referral Signed Up": "stage-won", "Reward Sent": "stage-demo",
+    "Onboarding": "stage-contacted", "Training": "stage-demo", "Live": "stage-won", "Churned": "stage-lost",
 }
 STAGE_TINTS = {
     "New": ("#10b981", "#f0fdf9"), "Contacted": ("#3b82f6", "#eff6ff"),
@@ -920,78 +1806,102 @@ STAGE_TINTS = {
     "Won": ("#10b981", "#ecfdf5"), "Lost": ("#ef4444", "#fef2f2"),
     "New Referral": ("#10b981", "#f0fdf9"), "Referral Signed Up": ("#10b981", "#ecfdf5"),
     "Reward Sent": ("#7c3aed", "#f5f3ff"),
+    "Onboarding": ("#3b82f6", "#eff6ff"), "Training": ("#7c3aed", "#f5f3ff"),
+    "Live": ("#10b981", "#ecfdf5"), "Churned": ("#ef4444", "#fef2f2"),
 }
 
-with tab_pipeline:
-    ph1, ph2 = st.columns([2, 1])
-    active_pipeline = ph1.selectbox("Deal pipeline", list(PIPELINES.keys()), key="pipeline_sel")
+if _active_page == "pipeline":
+    # ── Header row ──
+    _ph1, _ph2, _ph3, _ph4 = st.columns([4, 2, 1.5, 1.5])
+    _ph1.markdown("""<div><div style="font-size:24px;font-weight:700;color:#1a1a2e;">Pipeline</div>
+        <div style="font-size:13px;color:#94a3b8;">Track and manage your deals through each stage.</div></div>""", unsafe_allow_html=True)
+    active_pipeline = _ph2.selectbox("Pipeline", list(PIPELINES.keys()), key="pipeline_sel", label_visibility="collapsed")
     active_stages = PIPELINES[active_pipeline]
 
-    if ph2.button("＋ New deal", type="primary", key="new_deal_btn"):
-        st.session_state["show_new_deal"] = True
-
-    if st.session_state.get("show_new_deal"):
-        with st.form("new_deal_form", clear_on_submit=True):
-            st.subheader(f"New {active_pipeline} deal")
-            nc1, nc2 = st.columns(2)
-            nd_biz = nc1.text_input("Business name *", key="nd_biz")
-            nd_contact = nc2.text_input("Contact name", key="nd_contact")
-            nd_phone = nc1.text_input("Phone", key="nd_phone")
-            nd_email = nc2.text_input("Email", key="nd_email")
-            nd_region = nc1.text_input("Region", key="nd_region")
-            nd_category = nc2.text_input("Category", key="nd_category")
-            nd_stage = nc1.selectbox("Stage", active_stages, key="nd_stage")
-            nd_nad = nc2.date_input("Next action date", value=None, key="nd_nad")
-            nd_na = st.text_input("Next action", key="nd_na")
-            nd_notes = st.text_area("Notes", key="nd_notes")
-            fc1, fc2 = st.columns(2)
-            if fc1.form_submit_button("Add deal", type="primary"):
-                if not nd_biz:
-                    st.error("Business name required")
-                else:
-                    new_deal = {
-                        "id": int(next_id(df)), "business_name": nd_biz,
-                        "contact_name": nd_contact or None, "phone": nd_phone or None,
-                        "email": nd_email or None, "region": nd_region or None,
-                        "category": nd_category or None, "stage": nd_stage,
-                        "last_touch": None,
-                        "next_action_date": nd_nad.isoformat() if nd_nad else None,
-                        "next_action": nd_na or None, "notes": nd_notes or None,
-                        "source": "manual", "created": date.today().isoformat(),
-                        "pipeline": active_pipeline,
-                    }
-                    sb.table("leads").insert(new_deal).execute()
-                    st.success(f"Added {nd_biz} to {active_pipeline} pipeline")
-                    st.session_state["show_new_deal"] = False
-                    st.rerun()
-            if fc2.form_submit_button("Cancel"):
-                st.session_state["show_new_deal"] = False
+    with _ph3.popover("➕ New Deal", use_container_width=True):
+        st.markdown(f"**Add to {active_pipeline}**")
+        nd_biz = st.text_input("Business name *", key="nd_biz")
+        nc1, nc2 = st.columns(2)
+        nd_contact = nc1.text_input("Contact", key="nd_contact")
+        nd_email = nc2.text_input("Email", key="nd_email")
+        nd_phone = nc1.text_input("Phone", key="nd_phone")
+        nd_category = nc2.text_input("Category", key="nd_category")
+        nd_stage = st.selectbox("Stage", active_stages, key="nd_stage")
+        nd_deal_val = st.number_input("Deal value (£)", value=0.0, min_value=0.0, step=50.0, key="nd_deal_val")
+        if st.button("Add Deal", type="primary", key="nd_submit", use_container_width=True):
+            if not nd_biz:
+                st.error("Business name required")
+            else:
+                new_deal = {
+                    "id": int(next_id(df)),
+                    "business_name": nd_biz,
+                    "contact_name": nd_contact or None, "phone": nd_phone or None,
+                    "email": nd_email or None, "region": None,
+                    "category": nd_category or None, "stage": nd_stage,
+                    "last_touch": None, "next_action_date": None,
+                    "next_action": None, "notes": None,
+                    "source": "manual", "created": date.today().isoformat(),
+                    "pipeline": active_pipeline, "deal_value": nd_deal_val,
+                }
+                sb.table("leads").insert(new_deal).execute()
+                st.success(f"Added {nd_biz}")
                 st.rerun()
 
-    pf1, pf2, pf3 = st.columns([2, 2, 2])
-    p_region = pf1.text_input("Region filter", key="p_region")
-    p_search = pf2.text_input("Search name/email", key="p_search")
-    p_category = pf3.text_input("Category filter", key="p_category")
+    with _ph4.popover("⚙️ Edit Stages", use_container_width=True):
+        st.markdown(f"**Stages for {active_pipeline}**")
+        st.caption("One stage per line. Order = left to right on board.")
+        _current = "\n".join(active_stages)
+        _new_text = st.text_area("Stages", value=_current, height=200, key=f"edit_stages_{active_pipeline}", label_visibility="collapsed")
+        _new_stages = [s.strip() for s in _new_text.strip().split("\n") if s.strip()]
+        if st.button("Save Stages", type="primary", use_container_width=True, key="save_stages_btn"):
+            _p = load_pipelines()
+            _p[active_pipeline] = _new_stages
+            save_pipelines(_p)
+            st.session_state["_stages_saved"] = True
+        st.divider()
+        st.caption("Add new pipeline")
+        _new_pipe = st.text_input("Name", key="new_pipe_name_inline")
+        if st.button("Create Pipeline", key="create_pipe_inline", use_container_width=True) and _new_pipe:
+            _p = load_pipelines()
+            _p[_new_pipe] = ["New", "In Progress", "Done"]
+            save_pipelines(_p)
+            st.session_state["_stages_saved"] = True
+
+    if st.session_state.pop("_stages_saved", False):
+        st.success("Stages updated!")
+        st.rerun()
+
+    # ── Filters in card ──
+    st.markdown('<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:12px 20px;margin:8px 0 16px;">', unsafe_allow_html=True)
+    pf1, pf2, pf3 = st.columns(3)
+    p_search = pf1.text_input("Search", key="p_search", placeholder="🔍 Search deals...", label_visibility="collapsed")
+    _p_counties = sorted(set(get_county(r) for r in df["region"].dropna().unique().tolist() if r))
+    p_county = pf2.selectbox("County", ["All Counties"] + _p_counties, key="p_region", label_visibility="collapsed")
+    _p_industries = sorted(set(get_industry(c) for c in df["category"].dropna().unique().tolist() if c))
+    p_industry = pf3.selectbox("Industry", ["All Industries"] + _p_industries, key="p_industry", label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
 
     view = df.copy()
+    # Filter by pipeline column (default to "Sales" for old leads without pipeline set)
+    view["_pipeline"] = view["pipeline"].fillna("Sales").replace("", "Sales")
     if active_pipeline == "Referral":
         referral_only_stages = [s for s in REFERRAL_STAGES if s not in STAGES]
         view = view[
-            (view["source"] == "referral_import")
+            (view["_pipeline"] == "Referral")
+            | (view["source"] == "referral_import")
             | view["stage"].isin(referral_only_stages)
         ]
     else:
-        referral_only_stages = [s for s in REFERRAL_STAGES if s not in STAGES]
-        view = view[~view["stage"].isin(referral_only_stages)]
-    if p_region:
-        view = view[view["region"].str.contains(p_region, case=False, na=False)]
+        view = view[view["_pipeline"] == active_pipeline]
+    if p_county and p_county != "All Counties":
+        view = view[view["region"].apply(get_county) == p_county]
     if p_search:
         m = (view["business_name"].str.contains(p_search, case=False, na=False)
              | view["email"].str.contains(p_search, case=False, na=False)
              | view["contact_name"].str.contains(p_search, case=False, na=False))
         view = view[m]
-    if p_category:
-        view = view[view["category"].str.contains(p_category, case=False, na=False)]
+    if p_industry and p_industry != "All Industries":
+        view = view[view["category"].apply(get_industry) == p_industry]
 
     CARDS_DEFAULT = 8
     esc = html_mod.escape
@@ -1003,6 +1913,9 @@ with tab_pipeline:
     def move_lead(lid, new_stage):
         save_lead(lid, {"stage": new_stage})
 
+    def _move_and_rerun(lid, new_stage):
+        move_lead(lid, new_stage)
+
     cols = st.columns(len(active_stages))
     for i, stage in enumerate(active_stages):
         stage_df = view[view["stage"] == stage]
@@ -1011,35 +1924,45 @@ with tab_pipeline:
         show_count = len(stage_df) if expanded else CARDS_DEFAULT
 
         with cols[i]:
+            stage_rev = stage_df["deal_value"].sum()
+            rev_html = f' · <span style="font-weight:400;font-size:12px;">£{stage_rev:,.0f}</span>' if stage_rev > 0 else ""
             st.markdown(
-                f'<div class="kanban-header {cls}">{stage}<span class="count"> {len(stage_df)}</span></div>',
+                f'<div class="kanban-header {cls}">{stage}<span class="count"> {len(stage_df)}</span>{rev_html}</div>',
                 unsafe_allow_html=True,
             )
+            stage_idx = active_stages.index(stage)
             for _, row in stage_df.head(show_count).iterrows():
-                touch = row["last_touch"] or "No activity"
-                cat = esc(row["category"] or "")
-                na = esc(row["next_action"] or "")
-                na_line = f'<div class="meta">Next: {na}</div>' if na else ""
-                cat_line = f'<span class="category-tag">{cat}</span>' if cat else ""
+                touch = row["last_touch"] or ""
+                cat = esc(get_industry(row["category"]))
                 s_border, s_bg = STAGE_TINTS.get(stage, ("#e2e4e9", "#fff"))
+                deal_val = row.get("deal_value", 0)
+                _sc, _sc_label, _sc_color = LEAD_SCORES.get(str(row["id"]), (0, "🧊 Cold", "#94a3b8"))
+                _ds = days_since_touch(row.to_dict())
+                stale = f'<span style="color:#ef4444;font-size:9px;">🔴{_ds}d</span>' if _ds and _ds >= 14 and stage not in ("Won", "Lost") else ""
+                deal_html = f'<span style="color:#059669;font-weight:600;font-size:11px;">£{deal_val:,.0f}</span>' if deal_val > 0 else ""
+                cat_html = f'<span style="background:#f1f0ff;color:#7c3aed;font-size:9px;padding:1px 6px;border-radius:8px;">{cat}</span>' if cat and cat != "Other" else ""
+                score_html = f'<span style="color:{_sc_color};font-size:9px;font-weight:600;">{_sc_label}</span>'
+
                 with st.container(border=True):
-                    st.markdown(f'<style>[data-testid="stContainer"]:has(#card-{row["id"]}){{background:{s_bg} !important;border-left:3px solid {s_border} !important;}}</style><span id="card-{row["id"]}" style="display:none"></span>', unsafe_allow_html=True)
                     st.markdown(
-                        f'<div class="deal-card-inner">'
-                        f'<div class="biz">{esc(row["business_name"])}</div>'
-                        f'<div class="contact">{esc(row["contact_name"])}</div>'
-                        f'<div class="meta">{esc(touch)}</div>'
-                        f'{na_line}{cat_line}'
-                        f'</div>',
+                        f'<style>[data-testid="stContainer"]:has(#c{row["id"]}){{background:{s_bg}!important;border-left:3px solid {s_border}!important;padding:6px 8px 2px!important;margin-bottom:4px!important;}}</style>'
+                        f'<span id="c{row["id"]}" style="display:none"></span>'
+                        f'<div style="display:flex;justify-content:space-between;align-items:start;">'
+                        f'<div style="font-weight:700;font-size:14px;color:#1a1a2e;line-height:1.3;">{esc(row["business_name"][:36])}</div>'
+                        f'{deal_html}'
+                        f'</div>'
+                        f'<div style="font-size:10px;color:#64748b;margin:2px 0;">{esc(row["contact_name"])} {score_html} {stale}</div>'
+                        f'<div style="display:flex;gap:4px;align-items:center;margin-top:2px;">{cat_html}'
+                        f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    bc1, bc2 = st.columns([1, 2])
-                    bc1.button("View", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],))
-                    other_stages = [s for s in active_stages if s != stage]
-                    new_s = bc2.selectbox("Move", [stage] + other_stages, key=f"mv_{row['id']}", label_visibility="collapsed")
-                    if new_s != stage:
-                        move_lead(row["id"], new_s)
-                        st.rerun()
+                    # Compact button row: open + move arrows
+                    bc1, bc2, bc3 = st.columns([2, 1, 1])
+                    bc1.button("Open", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
+                    if stage_idx > 0:
+                        bc2.button("◀", key=f"mvl_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx - 1]), use_container_width=True)
+                    if stage_idx < len(active_stages) - 1:
+                        bc3.button("▶", key=f"mvr_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx + 1]), use_container_width=True)
 
             remaining = len(stage_df) - show_count
             if remaining > 0:
@@ -1078,13 +2001,31 @@ with tab_pipeline:
         st.rerun()
 
 # ─── Contacts (HubSpot-style table) ─────────────────────────────────────────
-with tab_contacts:
-    cf1, cf2, cf3, cf4 = st.columns([2, 1, 1, 1])
-    c_search = cf1.text_input("Search name, phone, email", key="c_search")
-    c_stage = cf2.selectbox("Lead status", ["All"] + STAGES, key="c_stage")
-    c_region = cf3.text_input("Region", key="c_region")
-    c_category = cf4.text_input("Category", key="c_category")
+if _active_page == "contacts":
+    esc_c = html_mod.escape
 
+    # Header row
+    ch1, ch2, ch3 = st.columns([4, 1, 1])
+    ch1.markdown("""<div><div style="font-size:24px;font-weight:700;color:#1a1a2e;">Contacts</div>
+        <div style="font-size:13px;color:#94a3b8;">Manage and organize your contacts.</div></div>""", unsafe_allow_html=True)
+    ch2.button("📥 Import", key="ct_import_btn", on_click=lambda: st.session_state.update({"nav": "📥 Import"}), use_container_width=True)
+    ch3.button("➕ Add Contact", key="ct_add_btn", on_click=lambda: st.session_state.update({"nav": "➕ Add Lead"}), use_container_width=True, type="primary")
+
+    # Filters in a clean card
+    st.markdown('<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin:12px 0;">', unsafe_allow_html=True)
+    cf1, cf2, cf3, cf4, cf5 = st.columns([3, 1.5, 1.5, 1.5, 1.5])
+    c_search = cf1.text_input("Search", key="c_search", placeholder="🔍 Search by name, phone, or email...", label_visibility="collapsed")
+    _all_stages = list(set(s for stages in PIPELINES.values() for s in stages))
+    c_stage = cf2.selectbox("Lead Status", ["All"] + sorted(_all_stages), key="c_stage")
+    _c_counties = sorted(set(get_county(r) for r in df["region"].dropna().unique().tolist() if r))
+    c_region = cf3.selectbox("County", ["All Counties"] + _c_counties, key="c_region")
+    _c_industries = sorted(set(get_industry(c) for c in df["category"].dropna().unique().tolist() if c))
+    c_industry = cf4.selectbox("Industry", ["All Industries"] + _c_industries, key="c_industry")
+    c_import_options = ["All imports"] + sorted([s for s in df["source"].dropna().unique().tolist() if s])
+    c_import = cf5.selectbox("Import CSV", c_import_options, key="c_import")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Apply filters
     cview = df.copy()
     if c_search:
         m = (cview["business_name"].str.contains(c_search, case=False, na=False)
@@ -1094,31 +2035,68 @@ with tab_contacts:
         cview = cview[m]
     if c_stage != "All":
         cview = cview[cview["stage"] == c_stage]
-    if c_region:
-        cview = cview[cview["region"].str.contains(c_region, case=False, na=False)]
-    if c_category:
-        cview = cview[cview["category"].str.contains(c_category, case=False, na=False)]
+    if c_region != "All Counties":
+        cview = cview[cview["region"].apply(get_county) == c_region]
+    if c_industry != "All Industries":
+        cview = cview[cview["category"].apply(get_industry) == c_industry]
+    if c_import != "All imports":
+        cview = cview[cview["source"] == c_import]
 
-    st.caption(f"{len(cview)} contacts")
-
-    page_size = 50
+    # Pagination header
+    page_size = 25
     total_pages = max(1, (len(cview) + page_size - 1) // page_size)
-    page = st.number_input("Page", 1, total_pages, 1, key="c_page")
+    pg1, pg2, pg3, pg4, pg5 = st.columns([3, 1, 1, 1, 2])
+    pg1.markdown(f'<div style="font-size:14px;color:#1a1a2e;font-weight:600;padding:8px 0;"><span style="color:#7c3aed;">{len(cview):,}</span> contacts found</div>', unsafe_allow_html=True)
+    if pg2.button("‹", key="c_prev", use_container_width=True):
+        if st.session_state.get("c_page", 1) > 1:
+            st.session_state["c_page"] = st.session_state.get("c_page", 1) - 1
+            st.rerun()
+    pg3.markdown(f'<div style="text-align:center;background:#7c3aed;color:#fff;border-radius:8px;padding:6px 0;font-size:13px;font-weight:600;">{st.session_state.get("c_page", 1)}</div>', unsafe_allow_html=True)
+    if pg4.button("›", key="c_next", use_container_width=True):
+        if st.session_state.get("c_page", 1) < total_pages:
+            st.session_state["c_page"] = st.session_state.get("c_page", 1) + 1
+            st.rerun()
+    _page_sizes = [25, 50, 100]
+    pg5.selectbox("Per page", _page_sizes, key="c_page_size", label_visibility="collapsed")
+    page_size = st.session_state.get("c_page_size", 25)
+    total_pages = max(1, (len(cview) + page_size - 1) // page_size)
+    page = min(st.session_state.get("c_page", 1), total_pages)
     page_df = cview.iloc[(page-1)*page_size : page*page_size]
 
-    for _, r in page_df.iterrows():
-        pill_cls = PILL_MAP.get(r["stage"], "stage-pill-new")
-        cc1, cc2, cc3, cc4, cc5 = st.columns([2, 2, 1, 1, 0.5])
-        cc1.markdown(f"**{r['contact_name'] or '--'}**  \n{r['business_name']}")
-        cc2.markdown(f"{r['email'] or '--'}  \n{r['phone'] or '--'}")
-        cc3.markdown(f"<span class='contact-stage {pill_cls}'>{r['stage']}</span>", unsafe_allow_html=True)
-        cc4.caption(f"{r['region'] or '--'} · {r['category'] or '--'}")
-        cc5.button("View", key=f"ct_{r['id']}", on_click=open_profile, args=(r["id"],))
+    # Table header
+    st.markdown("""<div style="display:grid;grid-template-columns:40px 2fr 2.5fr 1.5fr 1fr 1fr 1.2fr 80px;gap:8px;padding:12px 16px;
+        background:#f8f9fb;border-radius:10px 10px 0 0;border:1px solid #e2e4e9;border-bottom:2px solid #e2e4e9;
+        font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:1px;">
+        <div></div><div>Name</div><div>Email</div><div>Phone</div><div>Stage</div><div>County</div><div>Last Contact</div><div>Actions</div>
+    </div>""", unsafe_allow_html=True)
 
-    st.caption(f"Page {page} of {total_pages}")
+    # Table rows
+    for idx, (_, r) in enumerate(page_df.iterrows()):
+        pill_cls = PILL_MAP.get(r["stage"], "stage-pill-new")
+        initials = "".join(w[0] for w in (r["contact_name"] or "?").split()[:2]).upper() or "?"
+        bg = "#fff" if idx % 2 == 0 else "#fafbfc"
+        touch = r.get("last_touch") or ""
+        row_html = f"""<div style="display:grid;grid-template-columns:40px 2fr 2.5fr 1.5fr 1fr 1fr 1.2fr 80px;gap:8px;padding:10px 16px;
+            background:{bg};border:1px solid #e2e4e9;border-top:none;align-items:center;font-size:13px;">
+            <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#a78bfa);
+                color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;">{esc_c(initials)}</div>
+            <div><div style="font-weight:600;color:#1a1a2e;font-size:13px;">{esc_c(r['contact_name'] or '--')}</div>
+                <div style="font-size:11px;color:#94a3b8;">{esc_c(r['business_name'])}</div></div>
+            <div style="color:#64748b;font-size:12px;">{esc_c(r['email'] or '--')}</div>
+            <div style="color:#64748b;font-size:12px;">{esc_c(r['phone'] or '--')}</div>
+            <div><span class="contact-stage {pill_cls}">{esc_c(r['stage'])}</span></div>
+            <div style="font-size:11px;color:#94a3b8;">{esc_c(get_county(r['region']))}</div>
+            <div style="font-size:11px;color:#94a3b8;">{esc_c(touch[:10])}</div>
+        </div>"""
+        rc1, rc2 = st.columns([20, 1])
+        rc1.markdown(row_html, unsafe_allow_html=True)
+        rc2.button("Open", key=f"ct_{r['id']}", on_click=open_profile, args=(r["id"],))
+
+    # Bottom pagination
+    st.markdown(f'<div style="text-align:center;font-size:12px;color:#94a3b8;padding:12px;border:1px solid #e2e4e9;border-top:none;border-radius:0 0 10px 10px;background:#fafbfc;">Page {page} of {total_pages} &nbsp;·&nbsp; {page_size} per page &nbsp;·&nbsp; {len(cview):,} total</div>', unsafe_allow_html=True)
 
 # ─── Lead detail (quick pick → profile view) ─────────────────────────────
-with tab_lead:
+if _active_page == "lead_detail":
     if df.empty:
         st.info("No leads yet. Import some.")
     else:
@@ -1265,8 +2243,14 @@ with tab_lead:
                 # Fetch Gmail emails for this contact
                 if lead["email"]:
                     cached = load_gmail_cache(lead["email"])
-                    if st.button("Refresh from Gmail", key="d_gmail_refresh"):
-                        st.session_state["gmail_fetch_email"] = lead["email"]
+                    if st.button("🔄 Refresh from Gmail", key="d_gmail_refresh"):
+                        with st.spinner("Fetching emails from Gmail..."):
+                            count = fetch_gmail_for_contact(lead["email"])
+                        if count is not None:
+                            st.success(f"Found {count} emails")
+                            st.rerun()
+                        else:
+                            st.error("Gmail fetch failed. Run `python3 gmail_auth.py` first.")
 
                 # Build unified timeline: CRM activity + Gmail emails
                 timeline_items = []
@@ -1305,7 +2289,11 @@ with tab_lead:
                 timeline_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
                 if not timeline_items:
-                    st.caption("No activity yet. Send an email or log a call to start the timeline.")
+                    st.markdown("""<div style="text-align:center;padding:32px 16px;">
+                    <div style="font-size:36px;margin-bottom:8px;">📭</div>
+                    <div style="font-size:14px;font-weight:600;color:#1a1a2e;">No activity yet</div>
+                    <div style="font-size:12px;color:#94a3b8;">Send an email or log a call to start the timeline.</div>
+                </div>""", unsafe_allow_html=True)
                 else:
                     # Group by month
                     current_month = ""
@@ -1317,8 +2305,15 @@ with tab_lead:
                             month_label = dt.strftime("%B %Y")
                             date_label = dt.strftime("%b %d, %Y %H:%M")
                         except Exception:
-                            month_label = ""
-                            date_label = ts
+                            # Gmail dates: "Tue, 20 May 2025 14:30:00 +0000"
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                dt = parsedate_to_datetime(item["timestamp"])
+                                month_label = dt.strftime("%B %Y")
+                                date_label = dt.strftime("%b %d, %Y %H:%M")
+                            except Exception:
+                                month_label = ""
+                                date_label = ts
 
                         if month_label and month_label != current_month:
                             current_month = month_label
@@ -1347,13 +2342,17 @@ with tab_lead:
 
 
 # ─── Today ───────────────────────────────────────────────────────────────────
-with tab_today:
+if _active_page == "today":
     today = date.today().isoformat()
     due = df[(df["next_action_date"] <= today) & (df["next_action_date"] != "")
              & (~df["stage"].isin(["Won", "Lost"]))]
     st.subheader(f"Due today or overdue ({len(due)})")
     if due.empty:
-        st.info("Nothing due. Book next actions on Pipeline tab.")
+        st.markdown("""<div style="text-align:center;padding:48px 24px;">
+            <div style="font-size:48px;margin-bottom:12px;">🎯</div>
+            <div style="font-size:16px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">All clear!</div>
+            <div style="font-size:13px;color:#94a3b8;">No tasks due today. Book next actions on Pipeline.</div>
+        </div>""", unsafe_allow_html=True)
     else:
         st.dataframe(
             due[["business_name", "contact_name", "phone", "email", "stage", "next_action", "next_action_date"]],
@@ -1367,20 +2366,63 @@ with tab_today:
                  use_container_width=True, hide_index=True)
 
 # ─── Bulk email ──────────────────────────────────────────────────────────────
-with tab_bulk:
+if _active_page == "outreach":
     templates = load_templates()
     if df.empty:
         st.info("No leads. Import first.")
     else:
-        st.subheader("Send template to multiple leads")
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Outreach Centre</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Generate Gmail compose links for bulk sending</div>""", unsafe_allow_html=True)
         bc1, bc2 = st.columns(2)
         tmpl_pick = bc1.selectbox("Template", list(templates.keys()), key="b_tmpl")
         stage_pick = bc2.multiselect("Filter by stage", STAGES, default=["New"], key="b_stage")
-        region_pick = st.text_input("Region contains (optional)", key="b_region")
+        INDUSTRY_GROUPS = {
+            "Restaurant": ["restaurant", "italian_restaurant", "pizza_restaurant", "seafood_restaurant",
+                "japanese_restaurant", "chinese_restaurant", "mexican_restaurant", "indian_restaurant",
+                "thai_restaurant", "american_restaurant", "british_restaurant", "sri_lankan_restaurant",
+                "mediterranean_restaurant", "breakfast_restaurant", "steak_house", "hamburger_restaurant",
+                "bistro", "gastropub", "deli", "catering_service"],
+            "Cafe & Coffee": ["cafe", "coffee_shop", "coffee_roastery", "tea_store", "tea_house",
+                "ice_cream_shop", "cake_shop", "pastry_shop", "confectionery", "chocolate_factory"],
+            "Bar & Pub": ["bar", "pub", "wine_bar", "cocktail_bar", "sports_bar", "bar_and_grill",
+                "night_club", "brewpub", "brewery"],
+            "Beauty & Hair": ["beauty_salon", "hair_salon", "nail_salon", "barber_shop",
+                "skin_care_clinic", "body_art_service", "spa", "massage", "tailor",
+                "womens_clothing_store"],
+            "Health & Fitness": ["gym", "fitness_center", "yoga_studio", "wellness_center",
+                "physiotherapist", "chiropractor", "medical_clinic", "medical_center",
+                "sports_school", "sports_complex", "sportswear_store", "health"],
+            "Retail - Fashion": ["clothing_store", "shoe_store", "jewelry_store", "thrift_store"],
+            "Retail - Home": ["furniture_store", "home_goods_store", "home_improvement_store",
+                "building_materials_store", "garden_center", "florist", "painter"],
+            "Retail - Food": ["food_store", "bakery", "butcher_shop", "grocery_store",
+                "supermarket", "asian_grocery_store", "market", "farm", "liquor_store", "food"],
+            "Retail - Other": ["store", "gift_shop", "book_store", "toy_store", "electronics_store",
+                "sporting_goods_store", "bicycle_store", "auto_parts_store", "pet_store",
+                "department_store"],
+            "Art & Gallery": ["art_gallery", "art_studio"],
+            "Hospitality": ["hotel", "lodging", "event_venue", "wedding_venue", "tourist_attraction",
+                "tour_agency", "visitor_center", "aquarium"],
+            "Professional Services": ["general_contractor", "manufacturer", "consultant",
+                "corporate_office", "supplier", "wholesaler", "service", "storage", "laundry"],
+            "Community & Education": ["non_profit_organization", "community_center", "school",
+                "university", "research_institute", "child_care_agency", "local_government_office",
+                "performing_arts_theater", "sports_school"],
+            "Pets": ["pet_store", "pet_boarding_service"],
+            "Other": ["establishment", "point_of_interest"],
+        }
+        bc3, bc4 = st.columns(2)
+        region_pick = bc3.text_input("Region contains (optional)", key="b_region")
+        industry_pick = bc4.multiselect("Industry", sorted(INDUSTRY_GROUPS.keys()), key="b_industry")
 
         pool = df[df["stage"].isin(stage_pick)] if stage_pick else df.copy()
         if region_pick:
             pool = pool[pool["region"].str.contains(region_pick, case=False, na=False)]
+        if industry_pick:
+            allowed_cats = set()
+            for grp in industry_pick:
+                allowed_cats.update(INDUSTRY_GROUPS[grp])
+            pool = pool[pool["category"].isin(allowed_cats)]
         pool = pool[pool["email"].str.contains("@", na=False)]
         pool = pool[~pool["email"].str.lower().str.startswith(
             ("info@", "hello@", "contact@", "enquiries@", "admin@", "sales@", "office@", "reception@", "bookings@")
@@ -1414,66 +2456,95 @@ with tab_bulk:
 
         tracker = load_send_counts()
         remaining_today = sum(s["daily_cap"] - tracker["counts"].get(s["email"], 0) for s in SENDERS)
-        st.markdown(f"**Sender rotation active** — {len(SENDERS)} inboxes, **{remaining_today}** sends left today")
+        sender_html = f'<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin:16px 0;">'
+        sender_html += f'<div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:12px;">Sender Rotation &nbsp;<span style="color:#94a3b8;font-weight:400;">— {remaining_today} sends remaining today</span></div>'
         for s in SENDERS:
             used = tracker["counts"].get(s["email"], 0)
             left = s["daily_cap"] - used
-            bar_pct = used / s["daily_cap"] if s["daily_cap"] > 0 else 0
-            color = "🟢" if left > 20 else "🟡" if left > 5 else "🔴"
-            st.caption(f"{color} {s['email']}: {used}/{s['daily_cap']} sent ({left} left)")
+            bar_pct = min(used / s["daily_cap"], 1.0) if s["daily_cap"] > 0 else 0
+            bar_color = "#10b981" if left > 20 else "#f59e0b" if left > 5 else "#ef4444"
+            sender_html += f'''<div style="margin-bottom:10px;">
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                    <span style="font-weight:500;color:#1a1a2e;">{html_mod.escape(s["email"])}</span>
+                    <span style="color:#94a3b8;">{used}/{s["daily_cap"]}</span>
+                </div>
+                <div style="background:#e2e4e9;border-radius:10px;height:6px;overflow:hidden;">
+                    <div style="background:{bar_color};height:6px;width:{bar_pct*100:.0f}%;border-radius:10px;transition:width 0.3s;"></div>
+                </div></div>'''
+        sender_html += '</div>'
+        st.markdown(sender_html, unsafe_allow_html=True)
 
         if limit > remaining_today:
             st.error(f"Only {remaining_today} sends left across all inboxes today. Lower the limit or wait til tomorrow.")
 
-        if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
-            links = []
-            sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
+        def _generate_links():
+            _links = []
+            _sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
             for _, row in batch.iterrows():
-                sender = None
+                _sender = None
                 for s in SENDERS:
-                    if sender_counts[s["email"]] < s["daily_cap"]:
-                        sender = s
+                    if _sender_counts[s["email"]] < s["daily_cap"]:
+                        _sender = s
                         break
-                if not sender:
+                if not _sender:
                     break
-                lead = row.to_dict()
-                s, b = render_template(templates[tmpl_pick], lead)
-                gm = gmail_link(lead["email"], s, b, sender_email=sender["email"])
-                links.append({
-                    "business": lead["business_name"], "email": lead["email"],
-                    "link": gm, "sender": sender["email"],
-                    "lead_id": lead["id"], "subject": s, "body": b,
+                _lead = row.to_dict()
+                _s, _b = render_template(templates[tmpl_pick], _lead, sender_email=_sender["email"])
+                _gm = gmail_link(_lead["email"], _s, _b, sender_email=_sender["email"])
+                _links.append({
+                    "business": _lead["business_name"], "email": _lead["email"],
+                    "link": _gm, "sender": _sender["email"],
+                    "lead_id": _lead["id"], "subject": _s, "body": _b,
                 })
-                sender_counts[sender["email"]] += 1
-            st.session_state["bulk_links"] = links
+                _sender_counts[_sender["email"]] += 1
+            return _links
+
+        if st.button(f"Generate {limit} Gmail links", type="primary", key="b_send"):
+            st.session_state["bulk_links"] = _generate_links()
             st.rerun()
+
+        if st.session_state.get("bulk_auto_regen"):
+            st.session_state["bulk_auto_regen"] = False
+            st.session_state["bulk_links"] = _generate_links()
 
         if st.session_state.get("bulk_links"):
             links = st.session_state["bulk_links"]
             if "bulk_sent" not in st.session_state:
                 st.session_state["bulk_sent"] = set()
+            if "bulk_opened" not in st.session_state:
+                st.session_state["bulk_opened"] = set()
             sent_set = st.session_state["bulk_sent"]
             unsent = [i for i, l in enumerate(links) if i not in sent_set]
-            st.info(f"{len(links)} links generated. **{len(sent_set)}** confirmed sent, **{len(unsent)}** remaining.")
+            prog_pct = len(sent_set) / len(links) * 100 if links else 0
+            st.markdown(f"""<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:14px;font-weight:600;color:#1a1a2e;">{len(links)} links generated</span>
+                    <span style="font-size:13px;color:#94a3b8;"><span style="color:#10b981;font-weight:600;">{len(sent_set)}</span> sent &nbsp;·&nbsp; <span style="color:#f59e0b;font-weight:600;">{len(unsent)}</span> remaining</span>
+                </div>
+                <div style="background:#e2e4e9;border-radius:10px;height:6px;overflow:hidden;">
+                    <div style="background:linear-gradient(90deg,#10b981,#34d399);height:6px;width:{prog_pct:.0f}%;border-radius:10px;"></div>
+                </div></div>""", unsafe_allow_html=True)
 
             import streamlit.components.v1 as components
             current_sender = None
             for i, lnk in enumerate(links):
                 if lnk["sender"] != current_sender:
                     current_sender = lnk["sender"]
-                    st.markdown(f"**From: {current_sender}**")
+                    st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                 if i in sent_set:
-                    st.markdown(f"~~{lnk['business']}~~ — ✅ sent")
-                else:
-                    lc1, lc2, lc3 = st.columns([3, 3, 1])
-                    with lc1:
-                        components.html(
-                            f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
-                            f'style="color:#0d6efd;text-decoration:none;font-family:sans-serif;font-size:14px;">✉ {html_mod.escape(lnk["business"])}</a>',
-                            height=30,
-                        )
-                    lc2.caption(lnk["email"])
-                    if lc3.button("Sent", key=f"bsent_{i}"):
+                    st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
+                elif i in st.session_state.get("bulk_opened", set()):
+                    lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
+                    lc1.markdown(f'<span style="font-size:13px;color:#f59e0b;font-weight:500;">📨 {html_mod.escape(lnk["business"])}</span>', unsafe_allow_html=True)
+                    lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                    if lc4.button("🚫", key=f"bdne_{i}", help="Do not email — move to Lost"):
+                        save_lead(lnk["lead_id"], {"stage": "Lost", "notes": "Do not email"})
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
+                    if lc3.button("Sent ✓", key=f"bsent_{i}"):
                         tracker = load_send_counts()
                         log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
                         lead_row = df[df["id"] == str(lnk["lead_id"])]
@@ -1483,43 +2554,88 @@ with tab_bulk:
                         save_lead(lnk["lead_id"], updates)
                         tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                         save_send_counts(tracker)
-                        st.session_state["bulk_sent"].add(i)
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
+                else:
+                    lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
+                    with lc1:
+                        components.html(
+                            f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
+                            f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:13px;font-weight:500;">✉ {html_mod.escape(lnk["business"])}</a>',
+                            height=28,
+                        )
+                    lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                    if lc4.button("🚫", key=f"bdne_{i}", help="Do not email — move to Lost"):
+                        save_lead(lnk["lead_id"], {"stage": "Lost", "notes": "Do not email"})
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
+                        st.rerun()
+                    if lc3.button("Sent ✓", key=f"bsent_{i}"):
+                        tracker = load_send_counts()
+                        log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                        lead_row = df[df["id"] == str(lnk["lead_id"])]
+                        updates = {"last_touch": date.today().isoformat()}
+                        if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                            updates["stage"] = "Contacted"
+                        save_lead(lnk["lead_id"], updates)
+                        tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                        save_send_counts(tracker)
+                        st.session_state["bulk_links"] = None
+                        st.session_state["bulk_sent"] = set()
+                        st.session_state["bulk_opened"] = set()
+                        st.session_state["bulk_auto_regen"] = True
                         st.rerun()
 
             st.divider()
             unsent_links = [links[i]["link"] for i in unsent]
-            if unsent_links:
-                js_links = json.dumps(unsent_links)
-                import streamlit.components.v1 as comp2
-                comp2.html(
-                    f'''<button onclick="openAll()" style="background:#0d6efd;color:white;border:none;padding:10px 24px;
-                    border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;">🚀 Open all {len(unsent_links)} in new tabs</button>
-                    <script>
-                    function openAll() {{
-                        var links = {js_links};
-                        links.forEach(function(url) {{ window.open(url, '_blank'); }});
-                    }}
-                    </script>''',
-                    height=50,
-                )
+            BATCH_SIZE = 10
+            opened_set = st.session_state.get("bulk_opened", set())
+            # Unopened and unsent
+            unopened = [i for i in unsent if i not in opened_set]
+            if unopened:
+                # Group by sender
+                sender_groups = {}
+                for idx in unopened:
+                    lnk = links[idx]
+                    sender_groups.setdefault(lnk["sender"], []).append(idx)
+
+                for sender_email, sender_idxs in sender_groups.items():
+                    open_count = min(BATCH_SIZE, len(sender_idxs))
+                    profile_dir = SENDER_PROFILE.get(sender_email, "Profile 5")
+                    if st.button(f"Open next {open_count} for {sender_email} ({len(sender_idxs)} remaining)", type="primary", key=f"b_open_{sender_email}"):
+                        import subprocess, time
+                        batch_to_open = sender_idxs[:BATCH_SIZE]
+                        for idx in batch_to_open:
+                            subprocess.Popen([
+                                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                                f"--profile-directory={profile_dir}", links[idx]["link"]
+                            ])
+                            time.sleep(0.5)
+                        st.session_state["bulk_opened"].update(batch_to_open)
+                        st.rerun()
 
             cc1, cc2, cc3, cc4 = st.columns(4)
             if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
                 try:
                     from gmail_auth import check_sent_emails
-                    unsent_emails = [links[i]["email"] for i in unsent]
-                    found = check_sent_emails(unsent_emails, hours_back=24)
+                    all_unsent_emails = [links[i]["email"] for i in unsent]
+                    found = check_sent_emails(all_unsent_emails, hours_back=24) if all_unsent_emails else set()
                     tracker = load_send_counts()
                     newly_confirmed = 0
-                    for i, lnk in enumerate(links):
-                        if i not in sent_set and lnk["email"].lower() in found:
-                            log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                            lead_row = df[df["id"] == str(lnk["lead_id"])]
+                    for i in unsent:
+                        if links[i]["email"].lower() in found:
+                            log_activity(links[i]["lead_id"], links[i]["business"], "email", links[i]["subject"], links[i]["body"])
+                            lead_row = df[df["id"] == str(links[i]["lead_id"])]
                             updates = {"last_touch": date.today().isoformat()}
                             if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
                                 updates["stage"] = "Contacted"
-                            save_lead(lnk["lead_id"], updates)
-                            tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                            save_lead(links[i]["lead_id"], updates)
+                            tracker["counts"][links[i]["sender"]] = tracker["counts"].get(links[i]["sender"], 0) + 1
                             st.session_state["bulk_sent"].add(i)
                             newly_confirmed += 1
                     save_send_counts(tracker)
@@ -1541,11 +2657,13 @@ with tab_bulk:
                 save_send_counts(tracker)
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.success(f"Logged {len(links)} emails as sent.")
                 st.rerun()
             if cc2.button("❌ Cancel remaining", key="b_cancel"):
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.session_state["bulk_skip_offset"] = 0
                 st.info("Cancelled remaining. Already-confirmed sends kept.")
                 st.rerun()
@@ -1553,11 +2671,226 @@ with tab_bulk:
                 st.session_state["bulk_skip_offset"] = st.session_state.get("bulk_skip_offset", 0) + limit
                 st.session_state["bulk_links"] = None
                 st.session_state["bulk_sent"] = set()
+                st.session_state["bulk_opened"] = set()
                 st.rerun()
 
 
+# ─── Follow Up ───────────────────────────────────────────────────────────────
+if _active_page == "followup":
+    contacted = df[df["stage"] == "Contacted"].copy()
+    if contacted.empty:
+        st.info("No contacted leads to follow up with yet.")
+    else:
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Follow Up Centre</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Follow up with leads you've already emailed — detect bounces & replies</div>""", unsafe_allow_html=True)
+
+        # Status tags stored in notes field: [BOUNCED] [REPLIED]
+        def _fu_status(row):
+            notes = str(row.get("notes", "") or "")
+            if "[BOUNCED]" in notes:
+                return "Bounced"
+            if "[REPLIED]" in notes:
+                return "Replied"
+            return "Awaiting Reply"
+
+        contacted["fu_status"] = contacted.apply(_fu_status, axis=1)
+
+        # KPI row
+        n_awaiting = len(contacted[contacted["fu_status"] == "Awaiting Reply"])
+        n_replied = len(contacted[contacted["fu_status"] == "Replied"])
+        n_bounced = len(contacted[contacted["fu_status"] == "Bounced"])
+        st.markdown(f"""<div style="display:flex;gap:12px;margin-bottom:16px;">
+            <div class="kpi-card" style="background:#eff6ff;border-color:#bfdbfe;"><div class="num" style="color:#2563eb;">{n_awaiting}</div><div class="label">Awaiting Reply</div></div>
+            <div class="kpi-card" style="background:#f0fdf9;border-color:#bbf7d0;"><div class="num" style="color:#10b981;">{n_replied}</div><div class="label">Replied</div></div>
+            <div class="kpi-card" style="background:#fef2f2;border-color:#fecaca;"><div class="num" style="color:#ef4444;">{n_bounced}</div><div class="label">Bounced</div></div>
+        </div>""", unsafe_allow_html=True)
+
+        # Scan Gmail for bounces & replies
+        fu_c1, fu_c2, fu_c3 = st.columns(3)
+        if fu_c1.button("🔍 Scan for bounces & replies", type="primary", key="fu_scan"):
+            try:
+                from gmail_auth import check_bounces, check_replies
+                emails_to_check = contacted[contacted["fu_status"] == "Awaiting Reply"]["email"].dropna().str.lower().tolist()
+                if emails_to_check:
+                    with st.spinner(f"Scanning {len(emails_to_check)} emails..."):
+                        bounced = check_bounces(emails_to_check, hours_back=168)
+                        replied = check_replies(emails_to_check, hours_back=168)
+                    tagged = 0
+                    for _, row in contacted.iterrows():
+                        e = str(row["email"]).lower()
+                        notes = str(row.get("notes", "") or "")
+                        if e in bounced and "[BOUNCED]" not in notes:
+                            save_lead(row["id"], {"notes": notes + " [BOUNCED]", "stage": "Lost"})
+                            tagged += 1
+                        elif e in replied and "[REPLIED]" not in notes:
+                            save_lead(row["id"], {"notes": notes + " [REPLIED]"})
+                            tagged += 1
+                    st.success(f"Found {len(bounced)} bounces, {len(replied)} replies. Tagged {tagged} leads.")
+                    st.rerun()
+                else:
+                    st.info("No awaiting-reply leads to scan.")
+            except Exception as e:
+                st.error(f"Gmail scan failed: {e}")
+
+        # Filter
+        fu_filter = fu_c2.selectbox("Show", ["Awaiting Reply", "All", "Replied", "Bounced"], key="fu_filter")
+        if fu_filter != "All":
+            show_fu = contacted[contacted["fu_status"] == fu_filter]
+        else:
+            show_fu = contacted
+
+        # Follow-up template
+        templates = load_templates()
+        fu_tmpl = fu_c3.selectbox("Follow-up template", list(templates.keys()), key="fu_tmpl")
+
+        st.caption(f"Showing {len(show_fu)} leads")
+
+        # Days since last touch
+        today_dt = date.today()
+        for idx, row in show_fu.iterrows():
+            lead = row.to_dict()
+            lt = lead.get("last_touch", "")
+            if lt:
+                try:
+                    days_ago = (today_dt - date.fromisoformat(str(lt)[:10])).days
+                except Exception:
+                    days_ago = "?"
+            else:
+                days_ago = "?"
+
+            status = lead.get("fu_status", "Awaiting Reply")
+            if status == "Bounced":
+                badge = '<span style="background:#fef2f2;color:#ef4444;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">⛔ Bounced</span>'
+            elif status == "Replied":
+                badge = '<span style="background:#f0fdf9;color:#10b981;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">✅ Replied</span>'
+            else:
+                badge = '<span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">⏳ Awaiting</span>'
+
+            with st.container(border=True):
+                fc1, fc2, fc3, fc4, fc5 = st.columns([3, 2, 1, 1, 1])
+                fc1.markdown(f"**{html_mod.escape(str(lead.get('business_name', '')))}** &nbsp; {badge}", unsafe_allow_html=True)
+                fc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(str(lead.get("email", "")))}</span>', unsafe_allow_html=True)
+                fc3.markdown(f'<span style="font-size:12px;color:#64748b;">{days_ago}d ago</span>', unsafe_allow_html=True)
+
+                if status == "Awaiting Reply":
+                    # Generate follow-up link
+                    subj, body = render_template(templates[fu_tmpl], lead)
+                    link = gmail_link(lead["email"], subj, body)
+                    if fc4.button("✉️ Follow up", key=f"fu_send_{lead['id']}"):
+                        import subprocess
+                        profile_dir = SENDER_PROFILE.get(SENDERS[0]["email"], "Profile 5")
+                        subprocess.Popen([
+                            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                            f"--profile-directory={profile_dir}", link
+                        ])
+                    if fc5.button("🚫", key=f"fu_dne_{lead['id']}", help="Do not email — move to Lost"):
+                        save_lead(lead["id"], {"stage": "Lost", "notes": str(lead.get("notes", "") or "") + " [DO NOT EMAIL]"})
+                        st.rerun()
+                elif status == "Replied":
+                    if fc4.button("📞 Book demo", key=f"fu_demo_{lead['id']}"):
+                        save_lead(lead["id"], {"stage": "Demo Booked"})
+                        st.rerun()
+
+
+# ─── Tasks ───────────────────────────────────────────────────────────────────
+if _active_page == "tasks":
+    st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Task Manager</div>
+    <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Track follow-ups, calls, and to-dos across all leads</div>""", unsafe_allow_html=True)
+
+    all_tasks = load_tasks()
+    today_dt = date.today()
+
+    # Auto-create follow-up tasks for stale leads (7+ days no reply)
+    if "automations_ran" not in st.session_state:
+        st.session_state["automations_ran"] = True
+        try:
+            stale = df[(df["stage"] == "Contacted") & (df["last_touch"] != "")]
+            auto_created = 0
+            existing_task_leads = {t["lead_id"] for t in all_tasks if t.get("status") == "pending"}
+            for _, row in stale.iterrows():
+                try:
+                    lt = date.fromisoformat(str(row["last_touch"])[:10])
+                    if (today_dt - lt).days >= 7 and int(row["id"]) not in existing_task_leads:
+                        create_task(row["id"], f"Follow up — no reply in {(today_dt - lt).days}d",
+                                    due_date=today_dt.isoformat(), assigned_to=SENDERS[0]["name"])
+                        auto_created += 1
+                except Exception:
+                    continue
+            if auto_created:
+                st.toast(f"🤖 Auto-created {auto_created} follow-up tasks for stale leads")
+                all_tasks = load_tasks()  # reload
+        except Exception:
+            pass
+
+    # KPIs
+    pending_tasks = [t for t in all_tasks if t.get("status") == "pending"]
+    overdue_tasks = [t for t in pending_tasks if t.get("due_date") and t["due_date"] < today_dt.isoformat()]
+    today_tasks = [t for t in pending_tasks if t.get("due_date") == today_dt.isoformat()]
+    done_tasks = [t for t in all_tasks if t.get("status") == "done"]
+
+    st.markdown(f"""<div style="display:flex;gap:12px;margin-bottom:16px;">
+        <div class="kpi-card" style="background:#fef2f2;border-color:#fecaca;"><div class="num" style="color:#ef4444;">{len(overdue_tasks)}</div><div class="label">Overdue</div></div>
+        <div class="kpi-card" style="background:#eff6ff;border-color:#bfdbfe;"><div class="num" style="color:#3b82f6;">{len(today_tasks)}</div><div class="label">Due Today</div></div>
+        <div class="kpi-card" style="background:#f5f3ff;border-color:#ddd6fe;"><div class="num" style="color:#7c3aed;">{len(pending_tasks)}</div><div class="label">Pending</div></div>
+        <div class="kpi-card" style="background:#f0fdf9;border-color:#bbf7d0;"><div class="num" style="color:#10b981;">{len(done_tasks)}</div><div class="label">Done</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    # New task form
+    with st.expander("➕ New task", expanded=False):
+        ntc1, ntc2 = st.columns(2)
+        nt_lead = ntc1.selectbox("Lead", df["business_name"].tolist(), key="nt_lead_pick")
+        nt_title = ntc2.text_input("Task title", key="nt_title", placeholder="e.g. Call back Thursday")
+        ntc3, ntc4 = st.columns(2)
+        nt_due = ntc3.date_input("Due date", value=today_dt, key="nt_due")
+        nt_assign = ntc4.selectbox("Assign to", [s["name"] for s in SENDERS], key="nt_assign")
+        if st.button("Create task", type="primary", key="nt_create"):
+            if nt_title:
+                lead_match = df[df["business_name"] == nt_lead]
+                if not lead_match.empty:
+                    create_task(lead_match.iloc[0]["id"], nt_title, due_date=nt_due.isoformat(), assigned_to=nt_assign)
+                    st.success(f"Task created: {nt_title}")
+                    st.rerun()
+
+    # Task filter
+    task_filter = st.radio("Show", ["Overdue", "Today", "All Pending", "Completed"], horizontal=True, key="task_filter")
+
+    if task_filter == "Overdue":
+        show_tasks = overdue_tasks
+    elif task_filter == "Today":
+        show_tasks = today_tasks
+    elif task_filter == "All Pending":
+        show_tasks = pending_tasks
+    else:
+        show_tasks = done_tasks
+
+    if not show_tasks:
+        st.caption("No tasks in this view.")
+    else:
+        for t in show_tasks:
+            lead_name = ""
+            lead_match = df[df["id"] == str(t["lead_id"])]
+            if not lead_match.empty:
+                lead_name = lead_match.iloc[0]["business_name"]
+
+            overdue_badge = ""
+            if t.get("due_date") and t["due_date"] < today_dt.isoformat() and t.get("status") == "pending":
+                overdue_badge = ' <span style="background:#fef2f2;color:#ef4444;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;">OVERDUE</span>'
+
+            with st.container(border=True):
+                tc1, tc2, tc3, tc4 = st.columns([3, 2, 2, 1])
+                tc1.markdown(f"**{t['title']}**{overdue_badge}", unsafe_allow_html=True)
+                tc2.caption(f"📍 {lead_name}")
+                tc3.caption(f"📅 {t.get('due_date', '--')} · 👤 {t.get('assigned_to', '')}")
+                if t.get("status") == "pending":
+                    if tc4.button("✅ Done", key=f"t_done_{t['id']}"):
+                        update_task(t["id"], {"status": "done"})
+                        st.rerun()
+                else:
+                    tc4.caption("✅")
+
+
 # ─── Sequences ───────────────────────────────────────────────────────────────
-with tab_sequences:
+if _active_page == "sequences":
     sequences = load_sequences()
     templates = load_templates()
     seq_q = load_seq_queue()
@@ -1619,12 +2952,16 @@ with tab_sequences:
         st.caption("Steps: " + " → ".join(
             [f"Day {s['day']}: {s['channel']}" + (f" ({s['template']})" if s.get('template') else "") for s in seq_def["steps"]]
         ))
-        ec1, ec2 = st.columns(2)
+        ec1, ec2, ec3 = st.columns(3)
         e_stage = ec1.multiselect("Stage filter", STAGES, default=["New"], key="seq_e_stage")
         e_region = ec2.text_input("Region filter", key="seq_e_region")
+        import_options = ["All imports"] + sorted([s for s in df["source"].dropna().unique().tolist() if s])
+        e_import = ec3.selectbox("Import (CSV) filter", import_options, key="seq_e_import")
         pool = df[df["stage"].isin(e_stage)] if e_stage else df.copy()
         if e_region:
             pool = pool[pool["region"].str.contains(e_region, case=False, na=False)]
+        if e_import != "All imports":
+            pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
         already = set(seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
         pool = pool[~pool["id"].isin(already)]
@@ -1671,54 +3008,127 @@ with tab_sequences:
                 st.rerun()
 
 
-# ─── Dashboard charts ────────────────────────────────────────────────────────
-with tab_charts:
+# ─── Reports ─────────────────────────────────────────────────────────────────
+if _active_page == "reports":
     if df.empty:
         st.info("No data yet.")
     else:
-        st.subheader("Pipeline funnel")
-        stage_counts = df["stage"].value_counts().reindex(STAGES, fill_value=0)
-        st.bar_chart(stage_counts)
+        st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Reports & Analytics</div>
+        <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Pipeline health, conversion rates, and activity trends</div>""", unsafe_allow_html=True)
 
+        # ── Conversion Funnel ──
+        st.markdown("### Conversion Funnel")
+        funnel_stages = ["New", "Contacted", "Demo Booked", "Proposal", "Won"]
+        funnel_counts = [len(df[df["stage"] == s]) for s in funnel_stages]
+        funnel_data = pd.DataFrame({"Stage": funnel_stages, "Leads": funnel_counts})
+        st.bar_chart(funnel_data.set_index("Stage"))
+
+        # Conversion rates between stages
+        conv_html = '<div style="display:flex;gap:8px;margin:12px 0 24px 0;">'
+        for i in range(len(funnel_stages) - 1):
+            if funnel_counts[i] > 0:
+                rate = (funnel_counts[i + 1] / funnel_counts[i]) * 100
+            else:
+                rate = 0
+            color = "#10b981" if rate >= 30 else "#f59e0b" if rate >= 10 else "#ef4444"
+            conv_html += f'<div style="background:#f8f9fb;border:1px solid #e2e4e9;border-radius:8px;padding:8px 12px;text-align:center;flex:1;">'
+            conv_html += f'<div style="font-size:11px;color:#94a3b8;">{funnel_stages[i]} → {funnel_stages[i+1]}</div>'
+            conv_html += f'<div style="font-size:18px;font-weight:700;color:{color};">{rate:.0f}%</div></div>'
+        conv_html += '</div>'
+        st.markdown(conv_html, unsafe_allow_html=True)
+
+        # ── Revenue ──
+        rp1, rp2, rp3, rp4 = st.columns(4)
+        won_rev = df[df["stage"] == "Won"]["deal_value"].sum()
+        pipe_rev = df[~df["stage"].isin(["Won", "Lost"])]["deal_value"].sum()
+        proposal_rev = df[df["stage"] == "Proposal"]["deal_value"].sum()
+        demo_rev = df[df["stage"] == "Demo Booked"]["deal_value"].sum()
+        rp1.metric("Won Revenue", f"£{won_rev:,.0f}")
+        rp2.metric("Pipeline Value", f"£{pipe_rev:,.0f}")
+        rp3.metric("In Proposal", f"£{proposal_rev:,.0f}")
+        rp4.metric("In Demo", f"£{demo_rev:,.0f}")
+
+        # Revenue forecast (weighted by stage probability)
+        stage_prob = {"New": 0.05, "Contacted": 0.1, "Demo Booked": 0.3, "Proposal": 0.6, "Won": 1.0, "Lost": 0}
+        forecast = sum(
+            float(row.get("deal_value", 0) or 0) * stage_prob.get(row.get("stage", ""), 0)
+            for _, row in df.iterrows()
+        )
+        st.markdown(f'<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;padding:16px;margin:16px 0;">'
+                    f'<div style="font-size:14px;color:#94a3b8;">Weighted Revenue Forecast</div>'
+                    f'<div style="font-size:28px;font-weight:700;color:#7c3aed;">£{forecast:,.0f}</div>'
+                    f'<div style="font-size:12px;color:#94a3b8;">Based on stage probability × deal value</div></div>', unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Activity Stats ──
+        st.markdown("### Activity")
+        act = load_activity()
+        if not act.empty:
+            act["date"] = pd.to_datetime(act["timestamp"], errors="coerce").dt.date
+            act["week"] = pd.to_datetime(act["timestamp"], errors="coerce").dt.isocalendar().week
+
+            ac1, ac2, ac3, ac4 = st.columns(4)
+            n_emails = len(act[act["type"] == "email"])
+            n_calls = len(act[act["type"] == "call"])
+            n_notes = len(act[act["type"] == "note"])
+            this_week = act[act["date"] >= (date.today() - pd.Timedelta(days=7))]
+            ac1.metric("Total Emails", n_emails)
+            ac2.metric("Total Calls", n_calls)
+            ac3.metric("Total Notes", n_notes)
+            ac4.metric("This Week", len(this_week))
+
+            # Daily activity chart
+            daily = act.groupby(["date", "type"]).size().unstack(fill_value=0)
+            st.line_chart(daily)
+            st.caption("Activity logged per day (emails, calls, notes)")
+
+            # Emails per sender (from bulk outreach)
+            if "email" in act["type"].values:
+                st.markdown("### Emails by Week")
+                email_acts = act[act["type"] == "email"].copy()
+                email_acts["week_start"] = pd.to_datetime(email_acts["date"]) - pd.to_timedelta(pd.to_datetime(email_acts["date"]).dt.dayofweek, unit="d")
+                weekly = email_acts.groupby("week_start").size()
+                if not weekly.empty:
+                    st.bar_chart(weekly)
+        else:
+            st.caption("No activity logged yet.")
+
+        st.divider()
+
+        # ── Lead Score Distribution ──
+        st.markdown("### Lead Score Distribution")
+        score_labels = {"🔥 Hot": 0, "🟡 Warm": 0, "🧊 Cold": 0}
+        for lid, (sc, label, color) in LEAD_SCORES.items():
+            if label in score_labels:
+                score_labels[label] += 1
+        sc_df = pd.DataFrame({"Category": score_labels.keys(), "Count": score_labels.values()})
+        st.bar_chart(sc_df.set_index("Category"))
+
+        # ── Top regions ──
         ch1, ch2 = st.columns(2)
         with ch1:
-            st.subheader("Leads by region")
+            st.markdown("### Top Regions")
             region_counts = df["region"].value_counts().head(15)
             if not region_counts.empty:
                 st.bar_chart(region_counts)
-
         with ch2:
-            st.subheader("Leads by category")
+            st.markdown("### Top Categories")
             cat_counts = df["category"].value_counts().head(15)
             if not cat_counts.empty:
                 st.bar_chart(cat_counts)
 
-        st.subheader("Activity over time")
-        act = load_activity()
-        if not act.empty:
-            act["date"] = pd.to_datetime(act["timestamp"]).dt.date
-            daily = act.groupby(["date", "type"]).size().unstack(fill_value=0)
-            st.line_chart(daily)
-            st.caption("Emails + calls logged per day")
+        # ── Stale leads ──
+        st.markdown("### Stale Leads (7+ days no activity)")
+        if _stale_leads:
+            stale_df = pd.DataFrame(_stale_leads, columns=["Business", "Stage", "Days Since Touch", "ID"])
+            st.dataframe(stale_df[["Business", "Stage", "Days Since Touch"]], use_container_width=True, height=300)
         else:
-            st.caption("No activity logged yet. Start sending emails and logging calls.")
-
-        st.subheader("Sequence progress")
-        sq = load_seq_queue()
-        if not sq.empty:
-            done_ct = len(sq[sq["status"] == "done"])
-            pend_ct = len(sq[sq["status"] == "pending"])
-            sq_c1, sq_c2 = st.columns(2)
-            sq_c1.metric("Steps completed", done_ct)
-            sq_c2.metric("Steps pending", pend_ct)
-            by_seq = sq.groupby(["sequence_name", "status"]).size().unstack(fill_value=0)
-            st.bar_chart(by_seq)
-        else:
-            st.caption("No sequences enrolled yet.")
+            st.success("No stale leads! All leads are being worked.")
 
 
 # ─── Add lead ────────────────────────────────────────────────────────────────
-with tab_add:
+if _active_page == "add":
     with st.form("add_lead", clear_on_submit=True):
         c1, c2 = st.columns(2)
         biz = c1.text_input("Business name *")
@@ -1731,6 +3141,7 @@ with tab_add:
         stage = c2.selectbox("Stage", PIPELINES[pl], key="add_stage")
         nad = c1.date_input("Next action date", value=None)
         na = c2.text_input("Next action")
+        deal_val = c1.number_input("Deal value (£)", value=0.0, min_value=0.0, step=50.0)
         notes = st.text_area("Notes")
         if st.form_submit_button("Add", type="primary"):
             if not biz:
@@ -1743,13 +3154,13 @@ with tab_add:
                     "last_touch": None,
                     "next_action_date": nad.isoformat() if nad else None,
                     "next_action": na or None, "notes": notes or None, "source": "manual",
-                    "created": date.today().isoformat(), "pipeline": pl,
+                    "created": date.today().isoformat(), "pipeline": pl, "deal_value": deal_val,
                 }
                 sb.table("leads").insert(new).execute()
                 st.success(f"Added {biz}")
 
 # ─── Import ──────────────────────────────────────────────────────────────────
-with tab_import:
+if _active_page == "import":
     st.write(f"Source: `{LEADS_SRC}`")
     if LEADS_SRC.exists():
         src = pd.read_csv(LEADS_SRC, dtype=str).fillna("")
@@ -1759,8 +3170,11 @@ with tab_import:
         lim = c2.number_input("Limit", min_value=1, max_value=5000, value=100, step=50)
         st.caption("Generic inbox emails (info@/hello@ etc) auto-filtered. Duplicates by business name skipped.")
         if st.button("Import", type="primary"):
+            progress = st.progress(0, text="Importing leads...")
+            progress.progress(10, text="Reading source file...")
             df, added = import_leads(df, LEADS_SRC, rf, lim)
-            st.success(f"Imported {added} new leads")
+            progress.progress(100, text="Done!")
+            st.success(f"✅ Imported {added} new leads")
             st.rerun()
     else:
         st.error("Source CSV not found")
@@ -1773,19 +3187,32 @@ with tab_import:
         tmp_df = pd.read_csv(up, dtype=str).fillna("")
         st.write(f"**{len(tmp_df)} rows** found. Columns: {', '.join(tmp_df.columns.tolist())}")
         st.dataframe(tmp_df.head(10), use_container_width=True, height=200)
+        default_name = up.name.rsplit('.', 1)[0]
+        up_name = st.text_input("Import name (tags all rows so you can target them in sequences)",
+                                value=default_name, key="up_name",
+                                placeholder="e.g. Cornwall 2026-05-20")
         uc1, uc2 = st.columns(2)
         up_pipeline = uc1.selectbox("Import to pipeline", list(PIPELINES.keys()), key="up_pipeline")
         up_stage = uc2.selectbox("Default stage", PIPELINES[up_pipeline], key="up_stage")
         if st.button("Import uploaded", type="primary"):
-            tmp = ROOT / "_upload.csv"
-            tmp.write_bytes(up.getvalue())
-            df, added = import_leads(df, tmp, None, None, pipeline=up_pipeline, default_stage=up_stage)
-            tmp.unlink()
-            st.success(f"Imported {added} new leads to {up_pipeline} pipeline")
-            st.rerun()
+            if not up_name.strip():
+                st.error("Import name required — needed to target these leads in sequences.")
+            else:
+                tmp = ROOT / "_upload.csv"
+                tmp.write_bytes(up.getvalue())
+                progress = st.progress(0, text="Importing leads...")
+                progress.progress(10, text="Reading CSV...")
+                df, added = import_leads(df, tmp, None, None, pipeline=up_pipeline,
+                                          default_stage=up_stage, import_name=up_name.strip())
+                progress.progress(90, text=f"Imported {added} leads...")
+                tmp.unlink()
+                progress.progress(100, text="Done!")
+                st.success(f"✅ Imported {added} new leads tagged '{up_name.strip()}' to {up_pipeline} pipeline")
+                st.balloons()
+                st.rerun()
 
 # ─── Templates (HubSpot-style) ──────────────────────────────────────────────
-with tab_templates:
+if _active_page == "templates":
     templates = load_templates()
     names = list(templates.keys())
 
@@ -1867,12 +3294,57 @@ with tab_templates:
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
-with tab_settings:
+if _active_page == "settings":
     new_target = st.number_input("Monthly target (terminals)", min_value=1, value=cfg["target"])
     if st.button("Save target"):
         cfg["target"] = int(new_target)
         save_config(cfg)
         st.success("Saved")
+
+    st.divider()
+    st.subheader("Pipelines & Stages")
+    st.caption("Edit stage names for each pipeline. One stage per line.")
+
+    _pipes = load_pipelines()
+    _pipe_names = list(_pipes.keys())
+    _edited_pipes = {}
+    _changed = False
+
+    for pname in _pipe_names:
+        with st.expander(f"📋 {pname}", expanded=False):
+            current_stages = "\n".join(_pipes[pname])
+            new_stages_text = st.text_area(f"Stages for {pname}", value=current_stages, height=150, key=f"set_stages_{pname}")
+            new_stages = [s.strip() for s in new_stages_text.strip().split("\n") if s.strip()]
+            _edited_pipes[pname] = new_stages
+            if new_stages != _pipes[pname]:
+                _changed = True
+            # Rename pipeline
+            rc1, rc2 = st.columns([3, 1])
+            new_pname = rc1.text_input("Rename pipeline", value=pname, key=f"set_rename_{pname}")
+            if rc2.button("🗑️ Delete", key=f"set_del_{pname}"):
+                del _pipes[pname]
+                save_pipelines(_pipes)
+                st.success(f"Deleted {pname}")
+                st.rerun()
+            if new_pname != pname and new_pname.strip():
+                _edited_pipes[new_pname] = _edited_pipes.pop(pname)
+                _changed = True
+
+    # Add new pipeline
+    with st.expander("➕ Add new pipeline"):
+        new_pipe_name = st.text_input("Pipeline name", key="set_new_pipe_name")
+        new_pipe_stages = st.text_area("Stages (one per line)", value="New\nIn Progress\nDone", key="set_new_pipe_stages", height=100)
+        if st.button("Create pipeline", key="set_create_pipe"):
+            if new_pipe_name and new_pipe_name not in _edited_pipes:
+                _edited_pipes[new_pipe_name] = [s.strip() for s in new_pipe_stages.strip().split("\n") if s.strip()]
+                save_pipelines(_edited_pipes)
+                st.success(f"Created {new_pipe_name}")
+                st.rerun()
+
+    if st.button("💾 Save pipeline changes", type="primary", use_container_width=True):
+        save_pipelines(_edited_pipes)
+        st.success("Pipelines saved!")
+        st.rerun()
 
     st.divider()
     st.subheader("Export")
