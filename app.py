@@ -1033,15 +1033,24 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
     display: inline-block; background: #f1f0ff; color: #7c3aed;
     font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
 }
-/* Deal name button — looks like black heading text */
+/* Deal name button — looks like plain clickable text */
 [data-testid="stContainer"] .stButton > button {
-    background: none !important; border: none !important; box-shadow: none !important;
+    background: transparent !important; border: none !important; box-shadow: none !important;
     color: #1a1a2e !important; font-weight: 700 !important; font-size: 14px !important;
-    text-align: left !important; padding: 2px 0 !important; margin: 0 !important;
+    text-align: left !important; padding: 0 !important; margin: 0 !important;
     line-height: 1.3 !important; cursor: pointer !important;
+    min-height: 0 !important; height: auto !important;
+    border-radius: 0 !important; width: auto !important;
 }
 [data-testid="stContainer"] .stButton > button:hover {
-    color: #7c3aed !important; background: none !important;
+    color: #7c3aed !important; background: transparent !important;
+    text-decoration: underline !important;
+}
+[data-testid="stContainer"] .stButton > button:focus {
+    box-shadow: none !important; outline: none !important;
+}
+[data-testid="stContainer"] .stButton {
+    margin: 0 !important; padding: 0 !important;
 }
 /* Sidebar card link buttons */
 .profile-sidebar-card + div .stButton > button {
