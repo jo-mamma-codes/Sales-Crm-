@@ -93,6 +93,7 @@ DEFAULT_TEMPLATES = {
 }
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_templates():
     if TEMPLATES.exists():
         return json.loads(TEMPLATES.read_text())
@@ -102,16 +103,18 @@ def load_templates():
 
 def save_templates(t):
     TEMPLATES.write_text(json.dumps(t, indent=2))
+    load_templates.clear()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_activity():
     r = sb.table("activity").select("*").execute()
     if r.data:
-        df = pd.DataFrame(r.data).fillna("")
+        adf = pd.DataFrame(r.data).fillna("")
         for c in ACTIVITY_COLS:
-            if c not in df.columns:
-                df[c] = ""
-        return df
+            if c not in adf.columns:
+                adf[c] = ""
+        return adf
     return pd.DataFrame(columns=ACTIVITY_COLS)
 
 
@@ -125,8 +128,10 @@ def log_activity(lead_id, business_name, type_, subject, content):
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
     sb.table("activity").insert(row).execute()
+    load_activity.clear()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_tasks(lead_id=None):
     q = sb.table("tasks").select("*")
     if lead_id:
@@ -148,6 +153,7 @@ def create_task(lead_id, title, due_date=None, assigned_to=None, notes=None):
         row["notes"] = notes
     try:
         sb.table("tasks").insert(row).execute()
+        load_tasks.clear()
     except Exception:
         pass
 
@@ -155,13 +161,16 @@ def create_task(lead_id, title, due_date=None, assigned_to=None, notes=None):
 def update_task(task_id, updates):
     try:
         sb.table("tasks").update(updates).eq("id", int(task_id)).execute()
+        load_tasks.clear()
     except Exception:
         pass
 
 
 # ─── Lead Scoring ────────────────────────────────────────────────────────────
-def score_lead(lead, activity_df):
-    """Score a lead 0-100 based on engagement. Returns (score, label, color)."""
+def score_lead(lead, act_counts):
+    """Score a lead 0-100 based on engagement. Returns (score, label, color).
+    act_counts: dict of {lead_id_str: activity_count} (pre-computed for speed).
+    """
     score = 0
     lid = str(lead.get("id", ""))
 
@@ -169,15 +178,12 @@ def score_lead(lead, activity_df):
     stage_pts = {"New": 5, "Contacted": 20, "Demo Booked": 50, "Proposal": 70, "Won": 100, "Lost": 0}
     score += stage_pts.get(lead.get("stage", ""), 0)
 
-    # Activity count
-    if not activity_df.empty:
-        lead_acts = activity_df[activity_df["lead_id"] == lid]
-        n_acts = len(lead_acts)
-        score += min(n_acts * 5, 20)  # max 20 pts from activity
+    # Activity count (from pre-computed dict)
+    n_acts = act_counts.get(lid, 0)
+    score += min(n_acts * 5, 20)
 
-        # Email replies (check notes for [REPLIED])
-        if "[REPLIED]" in str(lead.get("notes", "")):
-            score += 15
+    if "[REPLIED]" in str(lead.get("notes", "")):
+        score += 15
 
     # Deal value bonus
     dv = float(lead.get("deal_value", 0) or 0)
@@ -673,6 +679,7 @@ def save_config(cfg):
     CONFIG.write_text(json.dumps(cfg, indent=2))
 
 
+@st.cache_data(ttl=120, show_spinner="Loading leads...")
 def load_crm():
     import time
     all_data = []
@@ -726,6 +733,9 @@ def save_lead(lead_id, updates):
         if v == "":
             updates[k] = None
     sb.table("leads").update(updates).eq("id", int(lead_id)).execute()
+    load_crm.clear()
+    st.session_state["_score_stale"] = True
+    st.session_state["_dupes_stale"] = True
 
 
 def next_id(df):
@@ -783,6 +793,7 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
         batch_size = 500
         for i in range(0, len(rows), batch_size):
             sb.table("leads").insert(rows[i:i+batch_size]).execute()
+        load_crm.clear()
         df = load_crm()
     return df, len(rows)
 
@@ -1374,9 +1385,13 @@ df = load_crm()
 # Pre-compute lead scores and duplicates (cached per session)
 if "lead_scores" not in st.session_state or st.session_state.get("_score_stale", True):
     _act_for_scoring = load_activity()
+    # Pre-compute activity counts per lead (O(n) instead of O(n*m))
+    _act_counts = {}
+    if not _act_for_scoring.empty and "lead_id" in _act_for_scoring.columns:
+        _act_counts = _act_for_scoring.groupby("lead_id").size().to_dict()
     _scores = {}
     for _, _row in df.iterrows():
-        _scores[str(_row["id"])] = score_lead(_row.to_dict(), _act_for_scoring)
+        _scores[str(_row["id"])] = score_lead(_row.to_dict(), _act_counts)
     st.session_state["lead_scores"] = _scores
     st.session_state["_score_stale"] = False
 
@@ -1657,6 +1672,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             if st.button("Delete permanently", type="primary", key="pv_del_btn", use_container_width=True):
                 if _confirm_name.strip().lower() == lead["business_name"].strip().lower():
                     sb.table("leads").delete().eq("id", lead_id).execute()
+                    load_crm.clear()
                     close_profile()
                     st.rerun()
                 else:
@@ -1906,6 +1922,7 @@ if _active_page == "pipeline":
                     "pipeline": active_pipeline, "deal_value": nd_deal_val,
                 }
                 sb.table("leads").insert(new_deal).execute()
+                load_crm.clear()
                 st.success(f"Added {nd_biz}")
                 st.rerun()
 
@@ -1936,6 +1953,7 @@ if _active_page == "pipeline":
                         sb.table("leads").update({"stage": _new_stages[0]}).eq("stage", orphan).eq("pipeline", active_pipeline).execute()
                     except Exception:
                         pass
+            load_crm.clear()
             st.session_state["_stages_saved"] = True
         st.divider()
         st.caption("Add new pipeline")
@@ -3233,6 +3251,7 @@ if _active_page == "add":
                     "created": date.today().isoformat(), "pipeline": pl, "deal_value": deal_val,
                 }
                 sb.table("leads").insert(new).execute()
+                load_crm.clear()
                 st.success(f"Added {biz}")
 
 # ─── Import ──────────────────────────────────────────────────────────────────
