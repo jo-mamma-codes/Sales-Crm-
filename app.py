@@ -1043,6 +1043,16 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 [data-testid="stContainer"] .stButton > button:hover {
     color: #7c3aed !important; background: none !important;
 }
+/* Sidebar card link buttons */
+.profile-sidebar-card + div .stButton > button {
+    background: none !important; border: none !important; box-shadow: none !important;
+    color: #3b82f6 !important; font-weight: 600 !important; font-size: 13px !important;
+    text-align: left !important; padding: 0 !important; margin: -8px 0 8px !important;
+    cursor: pointer !important;
+}
+.profile-sidebar-card + div .stButton > button:hover {
+    color: #7c3aed !important; text-decoration: underline !important;
+}
 /* Card buttons — ultra compact (override in later block) */
 [data-testid="stContainer"] .stSelectbox { margin-top: -8px; }
 [data-testid="stContainer"] .stSelectbox > div > div {
@@ -1564,31 +1574,41 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div class="sidebar-row"><span class="label">Source</span><span class="value">{esc(lead['source'] or '--')}</span></div>
         </div>""", unsafe_allow_html=True)
 
-        # Contact card
+        # Contact card — clickable name
         st.markdown(f"""<div class="profile-sidebar-card">
             <h4>Contact</h4>
             <div class="sidebar-company">
                 <div class="company-icon" style="border-radius:50%;">{esc(initials)}</div>
                 <div class="company-info">
-                    <div class="company-name">{esc(lead['contact_name'] or 'Unknown')}</div>
                     <div class="company-detail">{esc(lead['business_name'])}</div>
                 </div>
             </div>
             <div class="sidebar-row"><span class="label">Email</span><span class="value">{email_href}</span></div>
             <div class="sidebar-row"><span class="label">Phone</span><span class="value">{phone_href}</span></div>
         </div>""", unsafe_allow_html=True)
+        # Contact name as clickable button (styled as link)
+        st.button(f"👤 {lead['contact_name'] or 'Unknown'}", key="pv_contact_link", on_click=open_profile, args=(lead_id,))
 
-        # Company card
+        # Company card — clickable name shows all deals for this company
+        _company_deals = df[df["business_name"].str.lower() == lead["business_name"].lower()] if lead["business_name"] else pd.DataFrame()
+        _n_company_deals = len(_company_deals)
         st.markdown(f"""<div class="profile-sidebar-card">
             <h4>Company</h4>
             <div class="sidebar-company">
                 <div class="company-icon">{esc(_biz_initials)}</div>
                 <div class="company-info">
-                    <div class="company-name">{esc(lead['business_name'])}</div>
                     <div class="company-detail">{esc(_lead_industry)} · {esc(_lead_county)}</div>
                 </div>
             </div>
         </div>""", unsafe_allow_html=True)
+        # Company name button — opens company view
+        st.button(f"🏢 {lead['business_name']} ({_n_company_deals} deal{'s' if _n_company_deals != 1 else ''})", key="pv_company_link", on_click=lambda: st.session_state.update({"view_company": lead["business_name"]}))
+        # Show other deals from same company
+        if _n_company_deals > 1:
+            st.caption(f"Other deals at {lead['business_name']}:")
+            for _, _cd in _company_deals.iterrows():
+                if str(_cd["id"]) != lead_id:
+                    st.button(f"→ {_cd['contact_name']} · {_cd['stage']}", key=f"pv_cd_{_cd['id']}", on_click=open_profile, args=(_cd["id"],))
 
         # Notes card
         _notes_preview = (lead.get("notes") or "--")[:300]
