@@ -3105,15 +3105,56 @@ if _active_page == "sequences":
                     opened_set = st.session_state.get("seq_bulk_opened", set())
                     unopened = [i for i in unsent if i not in opened_set]
                     if unopened:
-                        tc1, tc2, tc3 = st.columns([1, 2, 2])
+                        tc1, tc2 = st.columns([1, 3])
                         n_open = tc1.number_input("Open at once", 1, 50, 20, key="seq_open_n_top", label_visibility="visible")
-                        if tc2.button(f"📨 Open next {int(n_open)} in browser", type="primary", key="seq_bulk_open_top", use_container_width=True):
-                            to_open = unopened[:int(n_open)]
-                            js_links = "".join(f'window.open({json.dumps(links[i]["link"])}, "_blank");\n' for i in to_open)
-                            components.html(f"<script>{js_links}</script>", height=0)
-                            for i in to_open:
-                                st.session_state["seq_bulk_opened"].add(i)
-                            st.success(f"Opened {len(to_open)} Gmail tabs. Allow popups for this site if blocked.")
+                        # Render an HTML/JS button that opens N tabs from a single click event (bypasses popup blocker better than triggering via Streamlit rerun)
+                        to_open = unopened[:int(n_open)]
+                        anchors = "".join(f'<a id="lnk_{j}" href="{l}" target="_blank" rel="noopener" style="display:none">x</a>' for j, l in enumerate([links[i]["link"] for i in to_open]))
+                        js = "function openAll(){for(var j=0;j<" + str(len(to_open)) + ";j++){document.getElementById('lnk_'+j).click();}fetch(window.location.href);}"
+                        button_html = f"""
+                        <div>
+                          {anchors}
+                          <button onclick="openAll()" style="background:#7c3aed;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;width:100%;">📨 Open next {len(to_open)} in browser tabs</button>
+                          <div style="font-size:11px;color:#94a3b8;margin-top:6px;">If blocked: click 🔒 in address bar → Site settings → Pop-ups → Allow. Then reload and click again.</div>
+                          <script>{js}</script>
+                        </div>
+                        """
+                        with tc2:
+                            components.html(button_html, height=90)
+                            # Track that user clicked (we can't detect click directly from iframe, so add a manual mark-opened button)
+                            if st.button(f"Mark {len(to_open)} as opened", key="seq_mark_opened", help="Click after opening the tabs so they don't show up again"):
+                                for i in to_open:
+                                    st.session_state["seq_bulk_opened"].add(i)
+                                st.rerun()
+                        if st.button(f"🔍 Check Gmail sent (auto-mark)", key="seq_check_top"):
+                            try:
+                                from gmail_auth import check_sent_emails
+                                by_sender = {}
+                                for i in unsent:
+                                    by_sender.setdefault(links[i]["sender"], []).append(i)
+                                tracker = load_send_counts()
+                                newly_confirmed = 0
+                                for sender_email, idxs in by_sender.items():
+                                    recipients = [links[i]["email"] for i in idxs]
+                                    found = check_sent_emails(recipients, hours_back=48, sender_email=sender_email)
+                                    for i in idxs:
+                                        if links[i]["email"].lower() in found:
+                                            lnk = links[i]
+                                            sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                            log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                                            lead_row = df[df["id"] == str(lnk["lead_id"])]
+                                            updates = {"last_touch": date.today().isoformat()}
+                                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                                updates["stage"] = "Contacted"
+                                            save_lead(lnk["lead_id"], updates)
+                                            tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                                            st.session_state["seq_bulk_sent"].add(i)
+                                            newly_confirmed += 1
+                                save_send_counts(tracker)
+                                st.session_state["_last_check_msg"] = f"✅ Found {newly_confirmed} sent emails via Gmail"
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Gmail check failed: {e}")
                         if tc3.button(f"🔍 Check Gmail sent (auto-mark)", key="seq_check_top", use_container_width=True):
                             try:
                                 from gmail_auth import check_sent_emails
