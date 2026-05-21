@@ -3579,39 +3579,62 @@ if _active_page == "sequences":
         if e_import != "All imports":
             pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
-        # Exclude DNC list (bounced + never_contact)
+
+        # ─── EXCLUSION TOGGLES (user controls what to filter) ───
+        st.markdown("**Exclude leads who:**")
+        ex1, ex2, ex3 = st.columns(3)
+        excl_sent_this = ex1.checkbox("Already SENT this sequence", value=True, key="excl_sent_this",
+                                       help="Always recommended — prevents re-sending same step")
+        excl_any_email = ex2.checkbox("Have been emailed (any sequence, any time)", value=False, key="excl_any_email",
+                                       help="Off lets you move unsent enrolled leads into a different sequence")
+        excl_pending_other = ex3.checkbox("Currently pending in another sequence", value=False, key="excl_pending_other",
+                                          help="On prevents enrolling in two sequences at once")
+
+        # DNC always excluded
         _dnc_file = ROOT / "bounced_emails.json"
         _dnc_emails = set()
         if _dnc_file.exists():
-            _dnc_data = json.loads(_dnc_file.read_text())
-            _dnc_emails = set(e.lower() for e in _dnc_data.get("bounced", []) + _dnc_data.get("never_contact", []))
+            try:
+                _dnc_data = json.loads(_dnc_file.read_text())
+                _dnc_emails = set(e.lower() for e in _dnc_data.get("bounced", []) + _dnc_data.get("never_contact", []))
+            except Exception:
+                pass
+        _before_dnc = len(pool)
         if _dnc_emails:
-            _before_dnc = len(pool)
             pool = pool[~pool["email"].str.lower().isin(_dnc_emails)]
-            _dnc_excluded = _before_dnc - len(pool)
-        else:
-            _dnc_excluded = 0
-        # Only exclude leads that ACTUALLY had an email SENT (not just enrolled).
-        # Two sources: (a) sequence_queue with status=done (sent) (b) activity_log email entries
+        _dnc_excluded = _before_dnc - len(pool)
+
+        # Build the excluded set based on toggles
+        excluded = set()
         _seq_sent = set()
         if not seq_q.empty:
             _done_q = seq_q[(seq_q["sequence_name"] == seq_name) & (seq_q["status"] == "done")]
             _seq_sent = set(str(x) for x in _done_q["lead_id"].unique())
+        if excl_sent_this:
+            excluded |= _seq_sent
+
         _act_check = load_activity()
         _already_emailed_pool = set()
         if not _act_check.empty and "type" in _act_check.columns and "lead_id" in _act_check.columns:
             _email_acts = _act_check[_act_check["type"] == "email"]
             _already_emailed_pool = set(str(x) for x in _email_acts["lead_id"].unique())
-        excluded = _seq_sent | _already_emailed_pool
-        before_excl = len(pool)
-        pool = pool[~pool["id"].astype(str).isin(excluded)]
-        excluded_count = before_excl - len(pool)
-        # Also count leads currently pending in this sequence (not blocking — informational)
+        if excl_any_email:
+            excluded |= _already_emailed_pool
+
         _pending_in_seq = set()
+        _pending_other_seq = set()
         if not seq_q.empty:
             _pq = seq_q[(seq_q["sequence_name"] == seq_name) & (seq_q["status"] == "pending")]
             _pending_in_seq = set(str(x) for x in _pq["lead_id"].unique())
-        st.caption(f"{len(pool)} eligible · {len(_seq_sent)} already SENT this sequence · {len(_already_emailed_pool)} have prior email activity · {len(_pending_in_seq)} currently pending · {_dnc_excluded} on DNC list")
+            _pq_other = seq_q[(seq_q["sequence_name"] != seq_name) & (seq_q["status"] == "pending")]
+            _pending_other_seq = set(str(x) for x in _pq_other["lead_id"].unique())
+        if excl_pending_other:
+            excluded |= _pending_other_seq
+
+        before_excl = len(pool)
+        pool = pool[~pool["id"].astype(str).isin(excluded)]
+        excluded_count = before_excl - len(pool)
+        st.caption(f"{len(pool)} eligible · {len(_seq_sent)} already SENT this sequence · {len(_already_emailed_pool)} have prior email activity · {len(_pending_in_seq)} pending this sequence · {len(_pending_other_seq)} pending other sequences · {_dnc_excluded} on DNC list")
 
         if len(pool) == 0:
             st.warning("No eligible leads match these filters.")
