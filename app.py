@@ -3330,9 +3330,14 @@ if _active_page == "sequences":
                             # Streamlit button — clicking marks as sent + opens Gmail tab via JS popup
                             with lc1:
                                 if st.button(f"✉ {lnk['business']} — {lnk['email']}", key=f"seq_open_{i}", use_container_width=True):
-                                    # Mark sent in DB
+                                    # IDEMPOTENT: only act if task is still pending. Returning UPDATE rows = 0 means already done.
+                                    _r = sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).eq("status", "pending").execute()
+                                    if not _r.data:
+                                        # Already sent by someone/something else — skip without re-logging
+                                        st.session_state["_last_check_msg"] = f"⚠️ {lnk['business']} was already sent — skipped duplicate"
+                                        st.session_state["seq_bulk_sent"].add(i)
+                                        st.rerun()
                                     tracker = load_send_counts()
-                                    sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                     log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
                                     lead_row = df[df["id"] == str(lnk["lead_id"])]
                                     updates = {"last_touch": date.today().isoformat()}
@@ -3342,7 +3347,6 @@ if _active_page == "sequences":
                                     tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
                                     save_send_counts(tracker)
                                     st.session_state["seq_bulk_sent"].add(i)
-                                    # Queue Gmail URL to auto-open on next rerun
                                     st.session_state["_seq_auto_open"] = lnk["link"]
                                     st.rerun()
                             if lc2.button("🚫", key=f"seq_skip_{i}", help="Skip this task"):
@@ -3633,6 +3637,49 @@ if _active_page == "sequences":
         else:
             cur = sequences[seq_pick]
             st.json(cur)
+
+            # ─── Duplicate sequence ───
+            with st.expander("📋 Duplicate this sequence", expanded=False):
+                dup_name = st.text_input("New sequence name", value=f"{seq_pick} (copy)", key="seq_m_dup_name")
+                dup_carry_enrollments = st.checkbox("Also carry existing enrollments over to the new sequence", value=False, key="seq_m_dup_carry",
+                                                    help="Off = only the sequence definition is copied. On = also enrolls all current pending leads into the new sequence.")
+                if st.button("Create duplicate", type="primary", key="seq_m_dup_btn"):
+                    if not dup_name.strip():
+                        st.error("Name required")
+                    elif dup_name in sequences:
+                        st.error(f"'{dup_name}' already exists — pick a different name")
+                    else:
+                        # Deep copy steps so edits don't leak
+                        import copy as _copy
+                        sequences[dup_name] = _copy.deepcopy(cur)
+                        save_sequences(sequences)
+                        # Optionally carry pending enrollments
+                        carried = 0
+                        if dup_carry_enrollments and not seq_q.empty:
+                            pending = seq_q[(seq_q["sequence_name"] == seq_pick) & (seq_q["status"] == "pending")]
+                            new_rows = []
+                            for lid, group in pending.groupby("lead_id"):
+                                biz = group["business_name"].iloc[0]
+                                for i, step in enumerate(sequences[dup_name]["steps"]):
+                                    due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                                    new_rows.append({
+                                        "lead_id": int(lid),
+                                        "business_name": biz,
+                                        "sequence_name": dup_name,
+                                        "step": i,
+                                        "due_date": due,
+                                        "status": "pending",
+                                    })
+                            if new_rows:
+                                # Filter out any leads that have already been sent in the NEW sequence
+                                # (defensive — should always be empty since seq is new)
+                                batch_size = 500
+                                for i in range(0, len(new_rows), batch_size):
+                                    sb.table("sequence_queue").insert(new_rows[i:i+batch_size]).execute()
+                                carried = len(set(r["lead_id"] for r in new_rows))
+                        st.success(f"✅ Created '{dup_name}'" + (f" with {carried} carried enrollments" if carried else ""))
+                        st.rerun()
+
             if st.button("Delete sequence", type="secondary", key="seq_m_del"):
                 del sequences[seq_pick]
                 save_sequences(sequences)
