@@ -3332,26 +3332,23 @@ if _active_page == "add":
 
 # ─── Import ──────────────────────────────────────────────────────────────────
 if _active_page == "import":
-    st.write(f"Source: `{LEADS_SRC}`")
+    # Show preset source section ONLY if file exists locally (skip on Streamlit Cloud)
     if LEADS_SRC.exists():
-        src = pd.read_csv(LEADS_SRC, dtype=str).fillna("")
-        regions = ["All"] + sorted(src["region"].dropna().unique().tolist())
-        c1, c2 = st.columns(2)
-        rf = c1.selectbox("Region", regions)
-        lim = c2.number_input("Limit", min_value=1, max_value=5000, value=100, step=50)
-        st.caption("Generic inbox emails (info@/hello@ etc) auto-filtered. Duplicates by business name skipped.")
-        if st.button("Import", type="primary"):
-            progress = st.progress(0, text="Importing leads...")
-            progress.progress(10, text="Reading source file...")
-            df, added, stats = import_leads(df, LEADS_SRC, rf, lim)
-            progress.progress(100, text="Done!")
-            st.success(f"✅ Imported {added} new leads")
-            st.info(f"📊 CSV had {stats['total']} rows: **{stats['inserted']} new** · {stats['skipped_existing']} already exist · {stats['skipped_generic_email']} generic emails · {stats['skipped_no_email']} no email · {stats['skipped_blocked']} bounced/blocked")
-            st.rerun()
-    else:
-        st.error("Source CSV not found")
-
-    st.divider()
+        with st.expander("Import from preset source CSV", expanded=False):
+            st.write(f"Source: `{LEADS_SRC}`")
+            src = pd.read_csv(LEADS_SRC, dtype=str).fillna("")
+            regions = ["All"] + sorted(src["region"].dropna().unique().tolist())
+            c1, c2 = st.columns(2)
+            rf = c1.selectbox("Region", regions)
+            lim = c2.number_input("Limit", min_value=1, max_value=5000, value=100, step=50)
+            st.caption("Generic inbox emails (info@/hello@ etc) auto-filtered. Duplicates by business name skipped.")
+            if st.button("Import", type="primary"):
+                progress = st.progress(0, text="Importing leads...")
+                progress.progress(10, text="Reading source file...")
+                df, added, stats = import_leads(df, LEADS_SRC, rf, lim)
+                progress.progress(100, text="Done!")
+                st.session_state["_last_import_msg"] = f"✅ Imported {added} new leads — CSV had {stats['total']} rows: **{stats['inserted']} new** · {stats['skipped_existing']} already exist · {stats['skipped_generic_email']} generic emails · {stats['skipped_no_email']} no email · {stats['skipped_blocked']} bounced/blocked"
+                st.rerun()
     # Show last import result if any
     if st.session_state.get("_last_import_msg"):
         st.success(st.session_state["_last_import_msg"])
