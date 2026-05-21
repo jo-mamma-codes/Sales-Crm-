@@ -43,6 +43,7 @@ def get_gmail_service(sender_email=None):
     """Get Gmail API service for sender_email.
 
     Tries per-sender token first (gmail_token_<email>.json), falls back to master.
+    On Streamlit Cloud, tries st.secrets["gmail_token"] (JSON string).
     """
     # Prefer per-sender token if it exists
     if sender_email:
@@ -57,6 +58,16 @@ def get_gmail_service(sender_email=None):
     creds = None
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    else:
+        # Try loading from Streamlit secrets (cloud deploy)
+        try:
+            import streamlit as st
+            token_json = st.secrets.get("gmail_token", "")
+            if token_json:
+                token_data = json.loads(token_json) if isinstance(token_json, str) else dict(token_json)
+                creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        except Exception:
+            pass
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
