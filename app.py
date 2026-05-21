@@ -3830,7 +3830,65 @@ if _active_page == "sequences":
                     st.rerun()
         else:
             cur = sequences[seq_pick]
-            st.json(cur)
+
+            # ─── EDIT sequence ───
+            with st.expander("✏️ Edit this sequence", expanded=True):
+                ec1, ec2 = st.columns([2, 1])
+                edit_name = ec1.text_input("Sequence name", value=seq_pick, key="seq_m_edit_name")
+                edit_n_steps = ec2.number_input("Number of steps", 1, 10, len(cur.get("steps", [])), key="seq_m_edit_nsteps")
+                edited_steps = []
+                for si in range(int(edit_n_steps)):
+                    existing = cur["steps"][si] if si < len(cur.get("steps", [])) else {"day": si * 3, "channel": "email", "template": None}
+                    st.markdown(f"**Step {si+1}**")
+                    sc1, sc2, sc3 = st.columns(3)
+                    d = sc1.number_input(f"Day", 0, 60, int(existing.get("day", si * 3)), key=f"seq_m_edit_d{si}")
+                    ch_options = ["email", "call"]
+                    ch_idx = ch_options.index(existing.get("channel", "email")) if existing.get("channel", "email") in ch_options else 0
+                    ch = sc2.selectbox("Channel", ch_options, index=ch_idx, key=f"seq_m_edit_ch{si}")
+                    tmpl_opts = ["(none)"] + list(templates.keys())
+                    cur_tmpl = existing.get("template") or "(none)"
+                    tmpl_idx = tmpl_opts.index(cur_tmpl) if cur_tmpl in tmpl_opts else 0
+                    tm = sc3.selectbox("Template", tmpl_opts, index=tmpl_idx, key=f"seq_m_edit_tm{si}")
+                    edited_steps.append({"day": int(d), "channel": ch, "template": tm if tm != "(none)" else None})
+
+                    # If template selected, show inline editor
+                    if tm != "(none)" and tm in templates:
+                        with st.expander(f"📝 Edit template '{tm}'", expanded=False):
+                            t_subj = st.text_input("Subject", value=templates[tm].get("subject", ""), key=f"seq_m_edit_tsubj_{si}")
+                            t_body = st.text_area("Body", value=templates[tm].get("body", ""), height=300, key=f"seq_m_edit_tbody_{si}")
+                            if st.button(f"💾 Save template '{tm}'", key=f"seq_m_edit_tsave_{si}"):
+                                templates[tm] = {"subject": t_subj, "body": t_body}
+                                save_templates(templates)
+                                load_templates.clear()
+                                st.success(f"Template '{tm}' saved")
+                                st.rerun()
+
+                save1, save2 = st.columns(2)
+                if save1.button("💾 Save sequence changes", type="primary", key="seq_m_edit_save"):
+                    if not edit_name.strip():
+                        st.error("Name required")
+                    else:
+                        if edit_name != seq_pick:
+                            # Renaming — also update sequence_queue entries
+                            if edit_name in sequences:
+                                st.error(f"'{edit_name}' already exists — pick different name")
+                                st.stop()
+                            sequences[edit_name] = {"steps": edited_steps}
+                            del sequences[seq_pick]
+                            try:
+                                sb.table("sequence_queue").update({"sequence_name": edit_name}).eq("sequence_name", seq_pick).execute()
+                            except Exception as e:
+                                st.warning(f"Couldn't migrate queue entries: {e}")
+                        else:
+                            sequences[seq_pick] = {"steps": edited_steps}
+                        save_sequences(sequences)
+                        st.success("Saved sequence")
+                        st.rerun()
+                save2.caption("Renaming also migrates existing enrollments to the new name")
+
+            # ─── Read-only JSON view ───
+            with st.expander("Show raw JSON", expanded=False):
+                st.json(cur)
 
             # ─── Duplicate sequence ───
             with st.expander("📋 Duplicate this sequence", expanded=False):
