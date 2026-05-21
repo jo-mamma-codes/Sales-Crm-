@@ -63,7 +63,24 @@ def get_gmail_service(sender_email=None):
         except Exception as e:
             _last_err = f"Failed reading {token_path.name}: {e}"
     if not creds:
-        # Try loading from Streamlit secrets (cloud deploy)
+        # Try loading from Supabase app_config (works on cloud, no secrets-setup dance)
+        try:
+            import streamlit as st
+            import os as _os
+            from supabase import create_client as _cc
+            _url = _os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
+            _key = _os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
+            if _url and _key:
+                _sb = _cc(_url, _key)
+                r = _sb.table("app_config").select("value").eq("key", "gmail_token").execute()
+                if r.data and r.data[0].get("value"):
+                    val = r.data[0]["value"]
+                    token_data = json.loads(val) if isinstance(val, str) else dict(val)
+                    creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        except Exception as e:
+            _last_err = f"Failed loading Gmail token from Supabase: {e}"
+    if not creds:
+        # Fallback: Streamlit secrets
         try:
             import streamlit as st
             token_json = st.secrets.get("gmail_token", "")
@@ -73,10 +90,11 @@ def get_gmail_service(sender_email=None):
                 else:
                     token_data = dict(token_json)
                 creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-            else:
-                _last_err = "No gmail_token in Streamlit secrets and no local token file"
+            elif not _last_err:
+                _last_err = "No gmail_token in Supabase or Streamlit secrets, and no local token file"
         except Exception as e:
-            _last_err = f"Failed loading Gmail token from secrets: {e}"
+            if not _last_err:
+                _last_err = f"Failed loading Gmail token from secrets: {e}"
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
