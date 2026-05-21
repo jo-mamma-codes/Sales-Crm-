@@ -3450,23 +3450,27 @@ if _active_page == "sequences":
         if e_import != "All imports":
             pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
-        # Force string comparison (sequence_queue stores int)
-        already = set(str(x) for x in seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
-        # Also exclude leads emailed in last 7 days via this sequence's templates
+        # Only exclude leads that ACTUALLY had an email SENT (not just enrolled).
+        # Two sources: (a) sequence_queue with status=done (sent) (b) activity_log email entries
+        _seq_sent = set()
+        if not seq_q.empty:
+            _done_q = seq_q[(seq_q["sequence_name"] == seq_name) & (seq_q["status"] == "done")]
+            _seq_sent = set(str(x) for x in _done_q["lead_id"].unique())
         _act_check = load_activity()
         _already_emailed_pool = set()
         if not _act_check.empty and "type" in _act_check.columns and "lead_id" in _act_check.columns:
-            _email_acts = _act_check[_act_check["type"] == "email"].copy()
-            if "date" in _email_acts.columns:
-                _email_acts["date"] = pd.to_datetime(_email_acts["date"], errors="coerce")
-                _cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
-                _email_acts = _email_acts[_email_acts["date"] >= _cutoff]
+            _email_acts = _act_check[_act_check["type"] == "email"]
             _already_emailed_pool = set(str(x) for x in _email_acts["lead_id"].unique())
-        excluded = already | _already_emailed_pool
+        excluded = _seq_sent | _already_emailed_pool
         before_excl = len(pool)
         pool = pool[~pool["id"].astype(str).isin(excluded)]
         excluded_count = before_excl - len(pool)
-        st.caption(f"{len(pool)} eligible · {len(already)} already enrolled in '{seq_name}' · {len(_already_emailed_pool)} emailed in last 7 days · {excluded_count} excluded total")
+        # Also count leads currently pending in this sequence (not blocking — informational)
+        _pending_in_seq = set()
+        if not seq_q.empty:
+            _pq = seq_q[(seq_q["sequence_name"] == seq_name) & (seq_q["status"] == "pending")]
+            _pending_in_seq = set(str(x) for x in _pq["lead_id"].unique())
+        st.caption(f"{len(pool)} eligible · {len(_seq_sent)} already SENT this sequence · {len(_already_emailed_pool)} have prior email activity · {len(_pending_in_seq)} currently pending (will be re-enrolled if selected)")
 
         if len(pool) == 0:
             st.warning("No eligible leads match these filters.")
@@ -3583,7 +3587,7 @@ if _active_page == "sequences":
                 done_steps = len(group[group["status"] == "done"])
                 pending = group[group["status"] == "pending"]
                 next_due = pending["due_date"].min() if not pending.empty else "—"
-                next_step = pending["step"].min() + 1 if not pending.empty else "—"
+                next_step = int(pending["step"].astype(int).min()) + 1 if not pending.empty else "—"
                 biz = group["business_name"].iloc[0]
                 lead_row = df[df["id"].astype(str) == str(lid)]
                 email_addr = lead_row.iloc[0]["email"] if not lead_row.empty else ""
