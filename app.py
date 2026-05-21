@@ -3868,6 +3868,33 @@ if _active_page == "reports":
         st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Reports & Analytics</div>
         <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Pipeline health, conversion rates, and activity trends</div>""", unsafe_allow_html=True)
 
+        # ── Sequence Performance ──
+        _seq_q_rep = load_seq_queue()
+        if not _seq_q_rep.empty:
+            st.markdown("### Sequence Performance")
+            _seq_stats = []
+            for sn in _seq_q_rep["sequence_name"].unique():
+                _sg = _seq_q_rep[_seq_q_rep["sequence_name"] == sn]
+                _enrolled = _sg["lead_id"].nunique()
+                _pending = len(_sg[_sg["status"] == "pending"])
+                _sent = len(_sg[_sg["status"] == "done"])
+                _skipped = len(_sg[_sg["status"] == "skipped"])
+                _failed = len(_sg[_sg["status"] == "failed"])
+                _completed_leads = _sg.groupby("lead_id").apply(lambda g: all(s in ("done", "skipped") for s in g["status"])).sum()
+                _seq_stats.append({
+                    "Sequence": sn,
+                    "Enrolled": _enrolled,
+                    "Sent": _sent,
+                    "Pending": _pending,
+                    "Skipped": _skipped,
+                    "Failed": _failed,
+                    "Completed": int(_completed_leads),
+                    "Completion %": f"{(_completed_leads / _enrolled * 100):.0f}%" if _enrolled else "0%",
+                })
+            st.dataframe(pd.DataFrame(_seq_stats), use_container_width=True, hide_index=True)
+            st.caption("Enrolled = unique leads in sequence · Sent = emails dispatched · Pending = upcoming steps · Completed = all steps done or skipped")
+            st.divider()
+
         # ── Conversion Funnel ──
         st.markdown("### Conversion Funnel")
         funnel_stages = ["New", "Contacted", "Demo Booked", "Proposal", "Won"]
