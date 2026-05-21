@@ -3094,11 +3094,15 @@ if _active_page == "sequences":
                 tracker = load_send_counts()
                 sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
 
-                # Build a set of already-emailed lead IDs (avoid emailing same lead twice via activity_log)
+                # Build a set of recently-emailed lead IDs (last 7 days) to skip dupes
                 _act = load_activity()
                 _already_emailed_ids = set()
                 if not _act.empty and "type" in _act.columns and "lead_id" in _act.columns:
-                    _email_acts = _act[_act["type"] == "email"]
+                    _email_acts = _act[_act["type"] == "email"].copy()
+                    if "date" in _email_acts.columns:
+                        _email_acts["date"] = pd.to_datetime(_email_acts["date"], errors="coerce")
+                        _cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
+                        _email_acts = _email_acts[_email_acts["date"] >= _cutoff]
                     _already_emailed_ids = set(str(x) for x in _email_acts["lead_id"].unique())
 
                 links = []
@@ -3448,14 +3452,21 @@ if _active_page == "sequences":
         pool = pool[pool["email"].str.contains("@", na=False)]
         # Force string comparison (sequence_queue stores int)
         already = set(str(x) for x in seq_q[seq_q["sequence_name"] == seq_name]["lead_id"].unique()) if not seq_q.empty else set()
-        # Also exclude leads who already have an email logged in activity_log (avoid re-emailing)
+        # Also exclude leads emailed in last 7 days via this sequence's templates
         _act_check = load_activity()
         _already_emailed_pool = set()
         if not _act_check.empty and "type" in _act_check.columns and "lead_id" in _act_check.columns:
-            _already_emailed_pool = set(str(x) for x in _act_check[_act_check["type"] == "email"]["lead_id"].unique())
+            _email_acts = _act_check[_act_check["type"] == "email"].copy()
+            if "date" in _email_acts.columns:
+                _email_acts["date"] = pd.to_datetime(_email_acts["date"], errors="coerce")
+                _cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
+                _email_acts = _email_acts[_email_acts["date"] >= _cutoff]
+            _already_emailed_pool = set(str(x) for x in _email_acts["lead_id"].unique())
         excluded = already | _already_emailed_pool
+        before_excl = len(pool)
         pool = pool[~pool["id"].astype(str).isin(excluded)]
-        st.caption(f"{len(pool)} eligible leads (not already enrolled or emailed)")
+        excluded_count = before_excl - len(pool)
+        st.caption(f"{len(pool)} eligible · {len(already)} already enrolled in '{seq_name}' · {len(_already_emailed_pool)} emailed in last 7 days · {excluded_count} excluded total")
 
         if len(pool) == 0:
             st.warning("No eligible leads match these filters.")
