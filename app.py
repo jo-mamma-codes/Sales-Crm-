@@ -728,14 +728,24 @@ def save_crm(df):
 
 
 def save_lead(lead_id, updates):
-    """Save specific fields for one lead (avoids full-table upsert)."""
+    """Save specific fields for one lead. Updates local cache instantly, writes to Supabase async."""
     for k, v in updates.items():
         if v == "":
             updates[k] = None
     sb.table("leads").update(updates).eq("id", int(lead_id)).execute()
-    load_crm.clear()
-    st.session_state["_score_stale"] = True
-    st.session_state["_dupes_stale"] = True
+    # Update local cached df instantly instead of full reload
+    _cached_df = st.session_state.get("_df_cache")
+    if _cached_df is not None:
+        mask = _cached_df["id"] == str(lead_id)
+        for k, v in updates.items():
+            if k in _cached_df.columns:
+                _cached_df.loc[mask, k] = str(v) if v is not None and k != "deal_value" else v
+        st.session_state["_df_cache"] = _cached_df
+    else:
+        load_crm.clear()
+        st.session_state.pop("_df_cache", None)
+    if "stage" in updates:
+        st.session_state["_score_stale"] = True
 
 
 def next_id(df):
@@ -794,6 +804,7 @@ def import_leads(df, src_path, region_filter=None, limit=None, pipeline="Sales",
         for i in range(0, len(rows), batch_size):
             sb.table("leads").insert(rows[i:i+batch_size]).execute()
         load_crm.clear()
+        st.session_state.pop("_df_cache", None)
         df = load_crm()
     return df, len(rows)
 
@@ -1380,7 +1391,16 @@ st.markdown(f"""<div style="display:flex;justify-content:space-between;align-ite
     <div style="font-size:12px;color:#94a3b8;">{date.today().strftime('%A, %d %B %Y')}</div>
 </div>""", unsafe_allow_html=True)
 cfg = load_config()
-df = load_crm()
+# Use local cache if available (avoids full Supabase re-fetch on every rerun)
+# Auto-refresh every 120s to stay in sync with DB
+import time as _time
+_cache_age = _time.time() - st.session_state.get("_df_cache_ts", 0)
+if "_df_cache" in st.session_state and _cache_age < 120:
+    df = st.session_state["_df_cache"]
+else:
+    df = load_crm()
+    st.session_state["_df_cache"] = df
+    st.session_state["_df_cache_ts"] = _time.time()
 
 # Pre-compute lead scores and duplicates (cached per session)
 if "lead_scores" not in st.session_state or st.session_state.get("_score_stale", True):
@@ -1673,6 +1693,7 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                 if _confirm_name.strip().lower() == lead["business_name"].strip().lower():
                     sb.table("leads").delete().eq("id", lead_id).execute()
                     load_crm.clear()
+                    st.session_state.pop("_df_cache", None)
                     close_profile()
                     st.rerun()
                 else:
@@ -1923,6 +1944,7 @@ if _active_page == "pipeline":
                 }
                 sb.table("leads").insert(new_deal).execute()
                 load_crm.clear()
+                st.session_state.pop("_df_cache", None)
                 st.success(f"Added {nd_biz}")
                 st.rerun()
 
@@ -1954,6 +1976,7 @@ if _active_page == "pipeline":
                     except Exception:
                         pass
             load_crm.clear()
+            st.session_state.pop("_df_cache", None)
             st.session_state["_stages_saved"] = True
         st.divider()
         st.caption("Add new pipeline")
@@ -3256,6 +3279,7 @@ if _active_page == "add":
                 }
                 sb.table("leads").insert(new).execute()
                 load_crm.clear()
+                st.session_state.pop("_df_cache", None)
                 st.success(f"Added {biz}")
 
 # ─── Import ──────────────────────────────────────────────────────────────────
