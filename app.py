@@ -3352,6 +3352,12 @@ if _active_page == "import":
         st.error("Source CSV not found")
 
     st.divider()
+    # Show last import result if any
+    if st.session_state.get("_last_import_msg"):
+        st.success(st.session_state["_last_import_msg"])
+        if st.button("Dismiss", key="dismiss_import_msg"):
+            del st.session_state["_last_import_msg"]
+            st.rerun()
     st.subheader("Upload custom CSV")
     st.caption("CSV needs `business_name` column. Optional: `email`, `phone`, `first_name`, `last_name`, `region`, `category`, `source`.")
     up = st.file_uploader("Choose CSV file", type="csv", key="csv_upload")
@@ -3458,8 +3464,7 @@ if _active_page == "import":
                 load_crm.clear()
                 st.session_state.pop("_df_cache", None)
                 _matched_no_change = sum(1 for biz in tmp_df_up["business_name"].str.strip().str.lower().unique() if biz in df_lookup) - len(set(lid for lid, _ in updates_to_apply))
-                st.success(f"✅ Import complete")
-                st.info(f"📊 CSV had {len(tmp_df_up)} rows: **{len(updates_to_apply)} existing leads updated** · **{len(inserts_to_apply)} new leads inserted** · {max(_matched_no_change, 0)} matched but nothing to update")
+                st.session_state["_last_import_msg"] = f"✅ Import complete — CSV had {len(tmp_df_up)} rows: **{len(updates_to_apply)} existing updated** · **{len(inserts_to_apply)} new inserted** · {max(_matched_no_change, 0)} matched but nothing to update"
                 st.rerun()
             else:
                 tmp = ROOT / "_upload.csv"
@@ -3471,8 +3476,7 @@ if _active_page == "import":
                 progress.progress(90, text=f"Imported {added} leads...")
                 tmp.unlink()
                 progress.progress(100, text="Done!")
-                st.success(f"✅ Imported {added} new leads tagged '{up_name.strip()}' to {up_pipeline} pipeline")
-                st.info(f"📊 CSV had {stats['total']} rows: **{stats['inserted']} new inserted** · {stats['skipped_existing']} already exist (skipped) · {stats['skipped_generic_email']} generic emails skipped · {stats['skipped_no_email']} no email skipped · {stats['skipped_blocked']} bounced/blocked skipped")
+                st.session_state["_last_import_msg"] = f"✅ Imported {added} new leads tagged '{up_name.strip()}' — CSV had {stats['total']} rows: **{stats['inserted']} new inserted** · {stats['skipped_existing']} already exist (skipped) · {stats['skipped_generic_email']} generic emails · {stats['skipped_no_email']} no email · {stats['skipped_blocked']} bounced/blocked"
                 st.balloons()
                 st.rerun()
 
