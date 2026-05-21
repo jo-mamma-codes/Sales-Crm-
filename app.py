@@ -1983,14 +1983,13 @@ if _active_page == "pipeline":
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    # Compact button row: open + move arrows + delete
-                    bc1, bc2, bc3, bc4 = st.columns([2, 1, 1, 0.6])
+                    # Compact row: Open button + stage dropdown + delete
+                    bc1, bc2, bc3 = st.columns([1.5, 2.5, 0.5])
                     bc1.button("Open", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
-                    if stage_idx > 0:
-                        bc2.button("◀", key=f"mvl_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx - 1]), use_container_width=True)
-                    if stage_idx < len(active_stages) - 1:
-                        bc3.button("▶", key=f"mvr_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx + 1]), use_container_width=True)
-                    if bc4.button("🗑", key=f"del_{row['id']}", use_container_width=True):
+                    _move_to = bc2.selectbox("Move", active_stages, index=stage_idx, key=f"mv_{row['id']}", label_visibility="collapsed")
+                    if _move_to != stage:
+                        _move_and_rerun(row["id"], _move_to)
+                    if bc3.button("🗑", key=f"del_{row['id']}", use_container_width=True):
                         st.session_state[f"confirm_del_{row['id']}"] = True
                     if st.session_state.get(f"confirm_del_{row['id']}"):
                         dc1, dc2 = st.columns(2)
