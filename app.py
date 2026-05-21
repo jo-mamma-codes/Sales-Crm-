@@ -2012,6 +2012,7 @@ if _active_page == "pipeline":
 
     def _move_and_rerun(lid, new_stage):
         move_lead(lid, new_stage)
+        st.rerun()
 
     cols = st.columns(len(active_stages))
     for i, stage in enumerate(active_stages):
@@ -2054,9 +2055,12 @@ if _active_page == "pipeline":
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    _move_to = st.selectbox("Move", active_stages, index=stage_idx, key=f"mv_{row['id']}", label_visibility="collapsed")
-                    if _move_to != stage:
-                        _move_and_rerun(row["id"], _move_to)
+                    # Move arrows
+                    _ac1, _ac2 = st.columns(2)
+                    if stage_idx > 0:
+                        _ac1.button("◀", key=f"mvl_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx - 1]), use_container_width=True)
+                    if stage_idx < len(active_stages) - 1:
+                        _ac2.button("▶", key=f"mvr_{row['id']}", on_click=_move_and_rerun, args=(row["id"], active_stages[stage_idx + 1]), use_container_width=True)
 
             remaining = len(stage_df) - show_count
             if remaining > 0:
