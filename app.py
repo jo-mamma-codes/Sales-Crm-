@@ -674,11 +674,21 @@ def save_config(cfg):
 
 
 def load_crm():
+    import time
     all_data = []
     page_size = 1000
     offset = 0
+    max_retries = 3
     while True:
-        r = sb.table("leads").select("*").range(offset, offset + page_size - 1).execute()
+        for attempt in range(max_retries):
+            try:
+                r = sb.table("leads").select("*").range(offset, offset + page_size - 1).execute()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    raise e
         if not r.data:
             break
         all_data.extend(r.data)
