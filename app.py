@@ -3361,6 +3361,7 @@ if _active_page == "import":
                 st.error("Import name required — needed to target these leads in sequences.")
             elif up_mode.startswith("Update"):
                 # UPDATE mode — find existing leads by business_name and merge missing fields
+                up.seek(0)
                 tmp_df_up = pd.read_csv(up, dtype=str).fillna("")
                 updated = 0
                 inserted = 0
