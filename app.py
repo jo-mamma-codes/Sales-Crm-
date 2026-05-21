@@ -3085,6 +3085,10 @@ if _active_page == "sequences":
                         _not_enrolled = len(_src_df[~_src_df["id"].isin(already)])
                         st.write(f"**Not already enrolled:** {_not_enrolled}")
                         st.write(f"**Stage filter applied:** {e_stage if e_stage else '(none — all stages)'}")
+                        # Sample 5 rows to see what's actually in the data
+                        st.write("**Sample 5 leads from this import:**")
+                        _sample_cols = [c for c in ["id", "business_name", "contact_name", "email", "phone", "region"] if c in _src_df.columns]
+                        st.dataframe(_src_df[_sample_cols].head(5), use_container_width=True)
         else:
             e_limit = st.slider("Enroll how many", 1, max(min(len(pool), 500), 2),
                                 min(50, len(pool)), key="seq_e_limit") if len(pool) > 1 else 1
