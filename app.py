@@ -3196,36 +3196,23 @@ if _active_page == "sequences":
                             st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                         if i in sent_set:
                             st.markdown(f'<div style="padding:6px 12px;font-size:13px;color:#94a3b8;text-decoration:line-through;">✅ {html_mod.escape(lnk["business"])} — {html_mod.escape(lnk["email"])}</div>', unsafe_allow_html=True)
-                        elif i in st.session_state.get("seq_bulk_opened", set()):
-                            lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
-                            lc1.markdown(f'<span style="font-size:13px;color:#f59e0b;font-weight:500;">📨 {html_mod.escape(lnk["business"])}</span>', unsafe_allow_html=True)
-                            lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
-                            if lc4.button("🚫", key=f"seq_bdne_{i}", help="Skip — mark task skipped"):
-                                sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
-                                st.session_state["seq_bulk_opened"].discard(i)
-                                st.rerun()
-                            if lc3.button("Sent ✓", key=f"seq_bsent_{i}"):
-                                tracker = load_send_counts()
-                                sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
-                                log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                                lead_row = df[df["id"] == str(lnk["lead_id"])]
-                                updates = {"last_touch": date.today().isoformat()}
-                                if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
-                                    updates["stage"] = "Contacted"
-                                save_lead(lnk["lead_id"], updates)
-                                tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
-                                save_send_counts(tracker)
-                                st.session_state["seq_bulk_sent"].add(i)
-                                st.rerun()
                         else:
+                            # Always show business name as a clickable Gmail link, regardless of opened state
+                            is_opened = i in st.session_state.get("seq_bulk_opened", set())
+                            status_icon = "📨" if is_opened else "✉"
                             lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
-                            with lc1:
-                                components.html(
-                                    f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" '
-                                    f'style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:13px;font-weight:500;">✉ {html_mod.escape(lnk["business"])}</a>',
-                                    height=28,
-                                )
-                            lc2.markdown(f'<span style="font-size:12px;color:#94a3b8;">{html_mod.escape(lnk["email"])}</span>', unsafe_allow_html=True)
+                            lc1.markdown(
+                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                f'style="color:#7c3aed;text-decoration:none;font-size:14px;font-weight:600;">'
+                                f'{status_icon} {html_mod.escape(lnk["business"])}</a>',
+                                unsafe_allow_html=True,
+                            )
+                            lc2.markdown(
+                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                f'style="color:#64748b;text-decoration:none;font-size:12px;">'
+                                f'{html_mod.escape(lnk["email"])}</a>',
+                                unsafe_allow_html=True,
+                            )
                             if lc4.button("🚫", key=f"seq_bdne_{i}", help="Skip — mark task skipped"):
                                 sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                 st.rerun()
