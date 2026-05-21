@@ -1033,6 +1033,16 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
     display: inline-block; background: #f1f0ff; color: #7c3aed;
     font-size: 10px; padding: 3px 10px; border-radius: 12px; margin-top: 6px; font-weight: 500;
 }
+/* Deal name button — looks like black heading text */
+[data-testid="stContainer"] .stButton > button {
+    background: none !important; border: none !important; box-shadow: none !important;
+    color: #1a1a2e !important; font-weight: 700 !important; font-size: 14px !important;
+    text-align: left !important; padding: 2px 0 !important; margin: 0 !important;
+    line-height: 1.3 !important; cursor: pointer !important;
+}
+[data-testid="stContainer"] .stButton > button:hover {
+    color: #7c3aed !important; background: none !important;
+}
 /* Card buttons — ultra compact (override in later block) */
 [data-testid="stContainer"] .stSelectbox { margin-top: -8px; }
 [data-testid="stContainer"] .stSelectbox > div > div {
@@ -1985,21 +1995,19 @@ if _active_page == "pipeline":
 
                 with st.container(border=True):
                     st.markdown(
-                        f'<style>[data-testid="stContainer"]:has(#c{row["id"]}){{background:{s_bg}!important;border-left:3px solid {s_border}!important;padding:6px 8px 2px!important;margin-bottom:4px!important;}}</style>'
-                        f'<span id="c{row["id"]}" style="display:none"></span>'
-                        f'<div style="display:flex;justify-content:space-between;align-items:start;">'
-                        f'<div style="font-weight:700;font-size:14px;color:#1a1a2e;line-height:1.3;">{esc(row["business_name"][:36])}</div>'
-                        f'{deal_html}'
-                        f'</div>'
-                        f'<div style="font-size:10px;color:#64748b;margin:2px 0;">{esc(row["contact_name"])} {score_html} {stale}</div>'
-                        f'<div style="display:flex;gap:4px;align-items:center;margin-top:2px;">{cat_html}'
+                        f'<style>[data-testid="stContainer"]:has(#c{row["id"]}){{background:{s_bg}!important;border-left:3px solid {s_border}!important;padding:6px 8px 2px!important;margin-bottom:4px!important;cursor:pointer;}}</style>'
+                        f'<span id="c{row["id"]}" style="display:none"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    # Business name IS the button
+                    st.button(row["business_name"][:36], key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
+                    st.markdown(
+                        f'<div style="font-size:10px;color:#64748b;margin:-8px 0 2px;">{esc(row["contact_name"])} {score_html} {stale} {deal_html}</div>'
+                        f'<div style="display:flex;gap:4px;align-items:center;">{cat_html}'
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
-                    # Compact row: clickable name opens deal page + stage dropdown
-                    bc1, bc2 = st.columns([1.2, 2])
-                    bc1.button("Open", key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
-                    _move_to = bc2.selectbox("Move", active_stages, index=stage_idx, key=f"mv_{row['id']}", label_visibility="collapsed")
+                    _move_to = st.selectbox("Move", active_stages, index=stage_idx, key=f"mv_{row['id']}", label_visibility="collapsed")
                     if _move_to != stage:
                         _move_and_rerun(row["id"], _move_to)
 
