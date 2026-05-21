@@ -3297,32 +3297,25 @@ if _active_page == "sequences":
                             current_sender = lnk["sender"]
                             st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
                         if i in sent_set:
-                            # Hide already-sent rows entirely
                             continue
                         else:
                             lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
-                            # Anchor that opens Gmail in new tab — onclick navigates parent with query param
-                            # so Streamlit reruns and marks task as sent automatically.
-                            with lc1:
-                                components.html(
-                                    f'''<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener"
-                                       onclick="setTimeout(function(){{
-                                         var u = new URL(window.parent.location.href);
-                                         u.searchParams.set('seq_opened', '{i}');
-                                         u.searchParams.set('seq_ts', Date.now());
-                                         window.parent.location.href = u.toString();
-                                       }}, 300);"
-                                       style="color:#7c3aed;text-decoration:none;font-family:Inter,sans-serif;font-size:14px;font-weight:600;">
-                                       ✉ {html_mod.escape(lnk["business"])}</a>''',
-                                    height=30,
-                                )
-                            with lc2:
-                                components.html(
-                                    f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                    f'style="color:#64748b;text-decoration:none;font-family:Inter,sans-serif;font-size:12px;">'
-                                    f'{html_mod.escape(lnk["email"])}</a>',
-                                    height=30,
-                                )
+                            # st.markdown renders in main page (not iframe) → onclick can modify parent URL
+                            onclick = f"setTimeout(function(){{var u=new URL(window.location.href);u.searchParams.set('seq_opened','{i}');u.searchParams.set('seq_ts',Date.now());window.location.href=u.toString();}},400);"
+                            lc1.markdown(
+                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                f'onclick="{onclick}" '
+                                f'style="color:#7c3aed;text-decoration:none;font-size:14px;font-weight:600;">'
+                                f'✉ {html_mod.escape(lnk["business"])}</a>',
+                                unsafe_allow_html=True,
+                            )
+                            lc2.markdown(
+                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
+                                f'onclick="{onclick}" '
+                                f'style="color:#64748b;text-decoration:none;font-size:12px;">'
+                                f'{html_mod.escape(lnk["email"])}</a>',
+                                unsafe_allow_html=True,
+                            )
                             if lc4.button("🚫", key=f"seq_bdne_{i}", help="Skip — mark task skipped"):
                                 sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                 st.rerun()
