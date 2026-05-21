@@ -5,7 +5,7 @@ sequence_queue.csv
 config.json
 # templates.json  — needed on cloud
 # sequences.json  — needed on cloud
-bounced_emails.json
+# bounced_emails.json  — needed on cloud for DNC list
 send_tracker.json
 gmail_cache/
 gmail_credentials.json

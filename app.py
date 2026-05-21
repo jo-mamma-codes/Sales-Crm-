@@ -1914,7 +1914,44 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                             st.warning("AI analysis unavailable. Set ANTHROPIC_API_KEY in .env")
 
     st.markdown("---")
-    st.button("← Back to list", on_click=close_profile, key="pv_back_bottom", type="primary")
+    pb1, pb2, pb3 = st.columns([2, 2, 2])
+    pb1.button("← Back to list", on_click=close_profile, key="pv_back_bottom", type="primary", use_container_width=True)
+
+    # DNC controls (file-based until schema migration)
+    _dnc_file_p = ROOT / "bounced_emails.json"
+    _dnc_data_p = {"bounced": [], "never_contact": []}
+    if _dnc_file_p.exists():
+        try:
+            _dnc_data_p = json.loads(_dnc_file_p.read_text())
+        except Exception:
+            pass
+    _lead_email_l = (lead.get("email") or "").lower()
+    _is_dnc = _lead_email_l in [e.lower() for e in _dnc_data_p.get("bounced", []) + _dnc_data_p.get("never_contact", [])]
+
+    if _is_dnc:
+        if pb2.button("✅ Remove from DNC list", key="pv_dnc_remove", use_container_width=True):
+            _dnc_data_p["bounced"] = [e for e in _dnc_data_p.get("bounced", []) if e.lower() != _lead_email_l]
+            _dnc_data_p["never_contact"] = [e for e in _dnc_data_p.get("never_contact", []) if e.lower() != _lead_email_l]
+            _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
+            st.success("Removed from DNC")
+            st.rerun()
+    else:
+        if _lead_email_l and pb2.button("🚫 Mark Do Not Email", key="pv_dnc_add", use_container_width=True):
+            _dnc_data_p.setdefault("never_contact", []).append(_lead_email_l)
+            _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
+            # Cancel any pending sequence tasks for this lead
+            sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
+            st.success("Added to DNC + cancelled pending sequence steps")
+            st.rerun()
+
+    if _lead_email_l and pb3.button("⚠️ Mark bounced", key="pv_bounce_add", use_container_width=True, help="Email bounced — add to bounced list so we never retry"):
+        _dnc_data_p.setdefault("bounced", []).append(_lead_email_l)
+        _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
+        sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
+        log_activity(lead_id, lead["business_name"], "bounce", "Email bounced (manual)", "")
+        st.success("Marked as bounced + cancelled pending steps")
+        st.rerun()
+
     st.stop()
 
 # ─── Page routing via sidebar nav ─────────────────────────────────────────
@@ -3156,6 +3193,16 @@ if _active_page == "sequences":
                 tracker = load_send_counts()
                 sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
 
+                # Load DNC list once for fast exclusion
+                _dnc_file_t = ROOT / "bounced_emails.json"
+                _dnc_emails_t = set()
+                if _dnc_file_t.exists():
+                    try:
+                        _dnc_data_t = json.loads(_dnc_file_t.read_text())
+                        _dnc_emails_t = set(e.lower() for e in _dnc_data_t.get("bounced", []) + _dnc_data_t.get("never_contact", []))
+                    except Exception:
+                        pass
+
                 # Build a set of recently-emailed lead IDs (last 7 days) to skip dupes
                 _act = load_activity()
                 _already_emailed_ids = set()
@@ -3189,6 +3236,10 @@ if _active_page == "sequences":
                         continue
 
                     if channel == "email" and tmpl_name and tmpl_name in templates and lead.get("email"):
+                        # Skip DNC emails (bounced/unsubscribed) — auto-mark task done so it doesn't reappear
+                        if lead["email"].lower() in _dnc_emails_t:
+                            sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(task["lead_id"])).eq("sequence_name", task["sequence_name"]).eq("step", step_idx).execute()
+                            continue
                         sender = None
                         for s in SENDERS:
                             if sender_counts[s["email"]] < s["daily_cap"]:
@@ -3255,11 +3306,18 @@ if _active_page == "sequences":
                         to_send = unopened[:int(n_send)]
                         if rs2.button(f"🚀 Send {len(to_send)} via Resend (auto)", type="primary", key="seq_resend_send", use_container_width=True):
                             tracker = load_send_counts()
-                            sent_ok, failed = 0, 0
+                            sent_ok, failed, skipped_dupe = 0, 0, 0
                             errors = []
                             progress = st.progress(0, text=f"Sending {len(to_send)} via Resend...")
                             for n, i in enumerate(to_send):
                                 lnk = links[i]
+                                # IDEMPOTENT GUARD: claim the task atomically before sending
+                                # If the row is already non-pending, skip
+                                _claim = sb.table("sequence_queue").update({"status": "sending"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).eq("status", "pending").execute()
+                                if not _claim.data:
+                                    skipped_dupe += 1
+                                    progress.progress(min(99, int((n+1) / len(to_send) * 100)), text=f"Skipped {lnk['business']} (already sent)")
+                                    continue
                                 sender_info = next((s for s in SENDERS if s["email"] == lnk["sender"]), None)
                                 from_name = sender_info["name"] if sender_info else "Sales"
                                 ok, msg = send_via_resend(lnk["sender"], from_name, lnk["email"], lnk["subject"], lnk["body"])
@@ -3275,12 +3333,17 @@ if _active_page == "sequences":
                                     st.session_state["seq_bulk_sent"].add(i)
                                     sent_ok += 1
                                 else:
+                                    # Mark as failed so it can be retried later
+                                    sb.table("sequence_queue").update({"status": "failed"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                     failed += 1
                                     errors.append(f"{lnk['business']}: {msg}")
                                 progress.progress(min(99, int((n+1) / len(to_send) * 100)), text=f"Sent {n+1}/{len(to_send)}...")
                             save_send_counts(tracker)
                             progress.progress(100, text="Done!")
-                            st.session_state["_last_resend_msg"] = f"✅ Resend complete: {sent_ok} sent, {failed} failed"
+                            _msg_parts = [f"✅ {sent_ok} sent"]
+                            if failed: _msg_parts.append(f"❌ {failed} failed")
+                            if skipped_dupe: _msg_parts.append(f"⏭️ {skipped_dupe} skipped (already sent)")
+                            st.session_state["_last_resend_msg"] = " · ".join(_msg_parts)
                             if errors:
                                 st.session_state["_last_resend_errors"] = errors[:10]
                             st.rerun()
@@ -3516,6 +3579,18 @@ if _active_page == "sequences":
         if e_import != "All imports":
             pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
+        # Exclude DNC list (bounced + never_contact)
+        _dnc_file = ROOT / "bounced_emails.json"
+        _dnc_emails = set()
+        if _dnc_file.exists():
+            _dnc_data = json.loads(_dnc_file.read_text())
+            _dnc_emails = set(e.lower() for e in _dnc_data.get("bounced", []) + _dnc_data.get("never_contact", []))
+        if _dnc_emails:
+            _before_dnc = len(pool)
+            pool = pool[~pool["email"].str.lower().isin(_dnc_emails)]
+            _dnc_excluded = _before_dnc - len(pool)
+        else:
+            _dnc_excluded = 0
         # Only exclude leads that ACTUALLY had an email SENT (not just enrolled).
         # Two sources: (a) sequence_queue with status=done (sent) (b) activity_log email entries
         _seq_sent = set()
@@ -3536,7 +3611,7 @@ if _active_page == "sequences":
         if not seq_q.empty:
             _pq = seq_q[(seq_q["sequence_name"] == seq_name) & (seq_q["status"] == "pending")]
             _pending_in_seq = set(str(x) for x in _pq["lead_id"].unique())
-        st.caption(f"{len(pool)} eligible · {len(_seq_sent)} already SENT this sequence · {len(_already_emailed_pool)} have prior email activity · {len(_pending_in_seq)} currently pending (will be re-enrolled if selected)")
+        st.caption(f"{len(pool)} eligible · {len(_seq_sent)} already SENT this sequence · {len(_already_emailed_pool)} have prior email activity · {len(_pending_in_seq)} currently pending · {_dnc_excluded} on DNC list")
 
         if len(pool) == 0:
             st.warning("No eligible leads match these filters.")
