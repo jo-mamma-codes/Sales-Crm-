@@ -2894,14 +2894,15 @@ if _active_page == "outreach":
                     if st.button(f"Open next {open_count} for {sender_email} ({len(sender_idxs)} remaining)", type="primary", key=f"b_open_{sender_email}"):
                         import subprocess, time
                         batch_to_open = sender_idxs[:BATCH_SIZE]
-                        for idx in batch_to_open:
-                            subprocess.Popen([
-                                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                                f"--profile-directory={profile_dir}", links[idx]["link"]
-                            ])
-                            time.sleep(0.5)
-                        st.session_state["bulk_opened"].update(batch_to_open)
-                        st.rerun()
+                        _chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                        if not os.path.exists(_chrome_path):
+                            st.error("Local Mac only — Chrome profile-switching needs a desktop browser. Use the JS 'Open N tabs' button at the top of this page on cloud.")
+                        else:
+                            for idx in batch_to_open:
+                                subprocess.Popen([_chrome_path, f"--profile-directory={profile_dir}", links[idx]["link"]])
+                                time.sleep(0.5)
+                            st.session_state["bulk_opened"].update(batch_to_open)
+                            st.rerun()
 
             cc1, cc2, cc3, cc4 = st.columns(4)
             if cc4.button("🔍 Check Gmail sent", key="b_check_sent"):
@@ -3061,12 +3062,14 @@ if _active_page == "followup":
                     subj, body = render_template(templates[fu_tmpl], lead)
                     link = gmail_link(lead["email"], subj, body)
                     if fc4.button("✉️ Follow up", key=f"fu_send_{lead['id']}"):
-                        import subprocess
-                        profile_dir = SENDER_PROFILE.get(SENDERS[0]["email"], "Profile 5")
-                        subprocess.Popen([
-                            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                            f"--profile-directory={profile_dir}", link
-                        ])
+                        _chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                        if os.path.exists(_chrome_path):
+                            import subprocess
+                            profile_dir = SENDER_PROFILE.get(SENDERS[0]["email"], "Profile 5")
+                            subprocess.Popen([_chrome_path, f"--profile-directory={profile_dir}", link])
+                        else:
+                            # Cloud — show link to click manually
+                            st.markdown(f"[Open Gmail compose for {lead['business_name']}]({link})")
                     if fc5.button("🚫", key=f"fu_dne_{lead['id']}", help="Do not email — move to Lost"):
                         save_lead(lead["id"], {"stage": "Lost", "notes": str(lead.get("notes", "") or "") + " [DO NOT EMAIL]"})
                         st.rerun()
@@ -3550,16 +3553,31 @@ if _active_page == "sequences":
                             if st.button(f"Open next {open_count} for {sender_email} ({len(sender_idxs)} remaining)", type="primary", key=f"seq_b_open_{sender_email}"):
                                 import subprocess, time
                                 batch_to_open = sender_idxs[:BATCH_SIZE]
-                                for idx in batch_to_open:
-                                    subprocess.Popen([
-                                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                                        f"--profile-directory={profile_dir}", links[idx]["link"]
-                                    ])
-                                    time.sleep(0.5)
-                                st.session_state["seq_bulk_opened"].update(batch_to_open)
-                                st.rerun()
+                                _chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                                if not os.path.exists(_chrome_path):
+                                    st.error("This 'Open in Chrome profile' button only works when running the CRM locally on your Mac. On Streamlit Cloud, use the '📨 Open N tabs' button at the top, or click each row individually.")
+                                else:
+                                    for idx in batch_to_open:
+                                        subprocess.Popen([
+                                            _chrome_path,
+                                            f"--profile-directory={profile_dir}", links[idx]["link"]
+                                        ])
+                                        time.sleep(0.5)
+                                    st.session_state["seq_bulk_opened"].update(batch_to_open)
+                                    st.rerun()
 
                     cc1, cc2, cc3, cc4 = st.columns(4)
+                    if cc3.button("🧪 Test Gmail connection", key="seq_b_test_gmail"):
+                        try:
+                            from gmail_auth import get_gmail_service
+                            svc = get_gmail_service()
+                            if svc is None:
+                                st.error("Gmail service returned None. Token not loaded. Check Streamlit secrets has `gmail_token = '<JSON string>'`")
+                            else:
+                                profile = svc.users().getProfile(userId="me").execute()
+                                st.success(f"✅ Connected as: {profile['emailAddress']}. Messages total: {profile.get('messagesTotal')}")
+                        except Exception as e:
+                            st.error(f"Gmail connection failed: {e}")
                     if cc4.button("🔍 Check Gmail sent", key="seq_b_check_sent"):
                         try:
                             from gmail_auth import check_sent_emails

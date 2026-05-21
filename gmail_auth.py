@@ -56,22 +56,38 @@ def get_gmail_service(sender_email=None):
         token_path = _token_file(None)
 
     creds = None
+    _last_err = None
     if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    else:
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        except Exception as e:
+            _last_err = f"Failed reading {token_path.name}: {e}"
+    if not creds:
         # Try loading from Streamlit secrets (cloud deploy)
         try:
             import streamlit as st
             token_json = st.secrets.get("gmail_token", "")
             if token_json:
-                token_data = json.loads(token_json) if isinstance(token_json, str) else dict(token_json)
+                if isinstance(token_json, str):
+                    token_data = json.loads(token_json)
+                else:
+                    token_data = dict(token_json)
                 creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        except Exception:
-            pass
+            else:
+                _last_err = "No gmail_token in Streamlit secrets and no local token file"
+        except Exception as e:
+            _last_err = f"Failed loading Gmail token from secrets: {e}"
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            token_path.write_text(creds.to_json())
+            try:
+                creds.refresh(Request())
+                try:
+                    token_path.write_text(creds.to_json())
+                except Exception:
+                    pass  # Can't write on read-only cloud FS — ok, refreshed in-memory
+            except Exception as e:
+                _last_err = f"Token refresh failed: {e}"
+                raise RuntimeError(_last_err)
         else:
             if not CREDS_FILE.exists():
                 print(f"Missing {CREDS_FILE}")
