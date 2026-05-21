@@ -1448,6 +1448,15 @@ with st.sidebar:
         st.session_state["_dupes_stale"] = True
         st.rerun()
 
+# Compute "today's emails" from activity_log (single source of truth)
+_act_for_count = load_activity()
+_emails_today_count = 0
+if not _act_for_count.empty and "type" in _act_for_count.columns and "date" in _act_for_count.columns:
+    _email_today_df = _act_for_count[_act_for_count["type"] == "email"].copy()
+    _email_today_df["_d"] = pd.to_datetime(_email_today_df["date"], errors="coerce")
+    _today_start = pd.Timestamp.now().normalize()
+    _emails_today_count = len(_email_today_df[_email_today_df["_d"] >= _today_start])
+
 # Quick stats in sidebar
 with st.sidebar:
     st.markdown(f"""<div style="border-top:1px solid #2d2d4a;padding:12px 16px;margin-top:8px;">
@@ -1461,7 +1470,7 @@ with st.sidebar:
         </div>
         <div style="display:flex;justify-content:space-between;">
             <span style="font-size:11px;color:#64648a;">Today's emails</span>
-            <span style="font-size:11px;color:#fff;font-weight:600;">{sum(load_send_counts()['counts'].values())}</span>
+            <span style="font-size:11px;color:#fff;font-weight:600;">{_emails_today_count}</span>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -2158,7 +2167,7 @@ if _active_page == "contacts":
     ch2.button("📥 Import", key="ct_import_btn", on_click=lambda: st.session_state.update({"nav": "📥 Import"}), use_container_width=True)
     ch3.button("➕ Add Contact", key="ct_add_btn", on_click=lambda: st.session_state.update({"nav": "➕ Add Lead"}), use_container_width=True, type="primary")
 
-    # Filters in a clean card
+    # Filters in a clean card — two rows
     st.markdown('<div style="background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:16px 20px;margin:12px 0;">', unsafe_allow_html=True)
     cf1, cf2, cf3, cf4, cf5 = st.columns([3, 1.5, 1.5, 1.5, 1.5])
     c_search = cf1.text_input("Search", key="c_search", placeholder="🔍 Search by name, phone, or email...", label_visibility="collapsed")
@@ -2170,6 +2179,14 @@ if _active_page == "contacts":
     c_industry = cf4.selectbox("Industry", ["All Industries"] + _c_industries, key="c_industry")
     c_import_options = ["All imports"] + sorted([s for s in df["source"].dropna().unique().tolist() if s])
     c_import = cf5.selectbox("Import CSV", c_import_options, key="c_import")
+
+    # Row 2 — sequence/email status filters
+    cg1, cg2, cg3 = st.columns([2, 2, 2])
+    _seq_q_for_filter = load_seq_queue()
+    _seq_names = ["Any"] + ["Not enrolled"] + (sorted(_seq_q_for_filter["sequence_name"].unique().tolist()) if not _seq_q_for_filter.empty else [])
+    c_seq = cg1.selectbox("Enrolled in sequence", _seq_names, key="c_seq")
+    c_email_status = cg2.selectbox("Email status", ["Any", "Never emailed", "Emailed (any time)", "Emailed in last 7 days", "Has reply", "Bounced"], key="c_email_status")
+    c_uploaded = cg3.selectbox("Upload date", ["Any", "Today", "Last 7 days", "Last 30 days"], key="c_uploaded")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Apply filters
@@ -2188,6 +2205,51 @@ if _active_page == "contacts":
         cview = cview[cview["category"].apply(get_industry) == c_industry]
     if c_import != "All imports":
         cview = cview[cview["source"] == c_import]
+
+    # Sequence enrollment filter
+    if c_seq != "Any":
+        if c_seq == "Not enrolled":
+            _enrolled_ids = set(str(x) for x in _seq_q_for_filter["lead_id"].unique()) if not _seq_q_for_filter.empty else set()
+            cview = cview[~cview["id"].astype(str).isin(_enrolled_ids)]
+        else:
+            _seq_ids = set(str(x) for x in _seq_q_for_filter[_seq_q_for_filter["sequence_name"] == c_seq]["lead_id"].unique())
+            cview = cview[cview["id"].astype(str).isin(_seq_ids)]
+
+    # Email status filter (uses activity_log)
+    if c_email_status != "Any":
+        _act_c = load_activity()
+        _email_acts_c = _act_c[_act_c["type"] == "email"] if not _act_c.empty and "type" in _act_c.columns else pd.DataFrame()
+        _emailed_ids = set(str(x) for x in _email_acts_c["lead_id"].unique()) if not _email_acts_c.empty else set()
+        if c_email_status == "Never emailed":
+            cview = cview[~cview["id"].astype(str).isin(_emailed_ids)]
+        elif c_email_status == "Emailed (any time)":
+            cview = cview[cview["id"].astype(str).isin(_emailed_ids)]
+        elif c_email_status == "Emailed in last 7 days":
+            if "date" in _email_acts_c.columns:
+                _email_acts_recent = _email_acts_c.copy()
+                _email_acts_recent["date"] = pd.to_datetime(_email_acts_recent["date"], errors="coerce")
+                _cutoff_c = pd.Timestamp.now() - pd.Timedelta(days=7)
+                _recent_ids = set(str(x) for x in _email_acts_recent[_email_acts_recent["date"] >= _cutoff_c]["lead_id"].unique())
+                cview = cview[cview["id"].astype(str).isin(_recent_ids)]
+        elif c_email_status == "Has reply":
+            _reply_acts = _act_c[_act_c["type"] == "reply"] if "type" in _act_c.columns else pd.DataFrame()
+            _reply_ids = set(str(x) for x in _reply_acts["lead_id"].unique()) if not _reply_acts.empty else set()
+            cview = cview[cview["id"].astype(str).isin(_reply_ids)]
+        elif c_email_status == "Bounced":
+            _bounce_acts = _act_c[_act_c["type"] == "bounce"] if "type" in _act_c.columns else pd.DataFrame()
+            _bounce_ids = set(str(x) for x in _bounce_acts["lead_id"].unique()) if not _bounce_acts.empty else set()
+            cview = cview[cview["id"].astype(str).isin(_bounce_ids)]
+
+    # Upload date filter (uses 'created' column)
+    if c_uploaded != "Any" and "created" in cview.columns:
+        _cview_dates = pd.to_datetime(cview["created"], errors="coerce")
+        _today_c = pd.Timestamp.now().normalize()
+        if c_uploaded == "Today":
+            cview = cview[_cview_dates >= _today_c]
+        elif c_uploaded == "Last 7 days":
+            cview = cview[_cview_dates >= _today_c - pd.Timedelta(days=7)]
+        elif c_uploaded == "Last 30 days":
+            cview = cview[_cview_dates >= _today_c - pd.Timedelta(days=30)]
 
     # Pagination header
     page_size = 25
@@ -3609,8 +3671,42 @@ if _active_page == "sequences":
 
             if display_rows:
                 display_df = pd.DataFrame(display_rows)
-                st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
+                st.dataframe(display_df, use_container_width=True, hide_index=True, height=500)
                 st.caption(f"Showing {len(display_df)} enrollments. Click column headers to sort.")
+
+                # ─── Bulk actions ───
+                st.divider()
+                st.markdown("**Bulk actions on visible enrollments**")
+                ba1, ba2, ba3 = st.columns(3)
+                if ba1.button(f"🚫 Skip remaining pending steps ({len(view[view['status']=='pending'])})", key="bulk_skip_pending"):
+                    _pending_ids = view[view["status"] == "pending"]["lead_id"].unique().tolist()
+                    if _pending_ids:
+                        sb.table("sequence_queue").update({"status": "skipped"}).in_("lead_id", [int(x) for x in _pending_ids]).eq("status", "pending").execute()
+                        if seq_filter != "All":
+                            # Scope to current sequence too
+                            pass
+                        st.success(f"Skipped {len(_pending_ids)} pending tasks")
+                        st.rerun()
+
+                _confirm_del = st.text_input("Type DELETE to confirm bulk removal", key="bulk_del_confirm", placeholder="DELETE")
+                if ba2.button(f"🗑️ Remove all visible enrollments ({len(view)})", key="bulk_delete_enrollments", type="secondary"):
+                    if _confirm_del.strip().upper() == "DELETE":
+                        _ids_to_del = view["lead_id"].astype(int).unique().tolist()
+                        # Delete only within the selected sequence (if filter applied)
+                        if seq_filter != "All":
+                            sb.table("sequence_queue").delete().in_("lead_id", _ids_to_del).eq("sequence_name", seq_filter).execute()
+                        else:
+                            # Delete only the visible (lead, seq) combos
+                            for _, row in view.iterrows():
+                                sb.table("sequence_queue").delete().eq("lead_id", int(row["lead_id"])).eq("sequence_name", row["sequence_name"]).execute()
+                        st.success(f"Removed {len(_ids_to_del)} enrollments")
+                        st.rerun()
+                    else:
+                        st.error("Type DELETE (uppercase) to confirm")
+
+                if ba3.button("📥 Export to CSV", key="bulk_export_enrolled"):
+                    csv_data = display_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Download CSV", csv_data, "enrollments.csv", "text/csv", key="dl_enrolled_csv")
             else:
                 st.info("No enrollments match filters.")
 
