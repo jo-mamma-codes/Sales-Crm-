@@ -3,8 +3,8 @@ crm_data.csv
 activity_log.csv
 sequence_queue.csv
 config.json
-templates.json
-sequences.json
+# templates.json  — needed on cloud
+# sequences.json  — needed on cloud
 bounced_emails.json
 send_tracker.json
 gmail_cache/

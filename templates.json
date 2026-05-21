@@ -1,0 +1,46 @@
+{
+  "Cold intro": {
+    "subject": "Quick idea for {{company}}",
+    "body": "Hi {{firstname}},\n\nI'm Joseph from yetipay. We give independent hospitality spots a free card terminal and lower rates than the big providers \u2014 no contracts, no setup fees.\n\nWorth a 10-minute chat to see if it'd save {{company}} money on card fees?\n\nCheers,\nJoseph\nyetipay"
+  },
+  "Follow-up 1": {
+    "subject": "Re: {{company}} card fees",
+    "body": "Hi {{firstname}},\n\nBumping this in case it got buried. Happy to send a 30-second cost comparison against your current provider \u2014 just need a recent statement.\n\nCheers,\nJoseph"
+  },
+  "Follow-up 2": {
+    "subject": "Last one from me \u2014 {{company}}",
+    "body": "Hi {{firstname}},\n\nTotally understand if the timing isn't right. I'll leave this with you \u2014 if {{company}} ever wants to cut card fees, I'm a quick reply away.\n\nCheers,\nJoseph"
+  },
+  "Demo booking": {
+    "subject": "yetipay demo \u2014 {{company}}",
+    "body": "Hi {{firstname}},\n\nConfirming our chat. I'll walk you through the terminal + rates and we can have you live this week if it stacks up.\n\nCheers,\nJoseph"
+  },
+  "Referral ask": {
+    "subject": "Quick favour",
+    "body": "Hi {{firstname}},\n\nHope all good with the terminal. Quick ask \u2014 know any other {{category}} owners who'd want the same setup? Happy to sort a referral bonus if they sign.\n\nCheers,\nJoseph"
+  },
+  "FAO Save on Rates": {
+    "subject": "FAO: {{firstname}} - Save on your processing fees + optional free POS",
+    "body": "Hi {{firstname}},\n\nWe're currently working with a number of businesses who are feeling the squeeze from rising wages, supplier costs, and increasing business rates.\n\nAs part of our payments bundle, we're helping operators streamline their setup, reduce costs, and unlock additional value, including:\n\n• Savings on processing rates compared to many current providers\n• Free on-device POS\n• Free website hosting with ongoing management\n• Simple and efficient Pay-by-Link & MOTO for card-not-present transactions\n• 24/7 UK-based phone support\n• Real-time reporting via a mobile app\n• Additional revenue through on-terminal advertising\n• Access to capital funding when needed\n• Post-purchase customer insights\n• Same-day setup in minutes\n\nI appreciate you may already have a strong incumbent in place, but it would be useful to run a quick comparison against your current setup — we often uncover small changes that make a noticeable difference both commercially and operationally.\n\nAre you around for a quick call this week to take a look?\n\nBest regards,\nJoseph Allison – Senior Sales Manager\nE: joseph@yetipay.me\nM: 07521431294\nW: www.yetipay.me\n17 St Anne's Court, London, W1F 0BQ"
+  },
+  "FAO Free Card Machine": {
+    "subject": "FAO: {{firstname}} - Free Card Machine + optional Free POS",
+    "body": "Hi {{firstname}},\n\nWe're currently working with a number of businesses who are feeling the squeeze from rising wages, supplier costs, and increasing business rates.\n\nAs part of our payments bundle, we're helping operators streamline their setup, reduce costs, and unlock additional value, including:\n\n• Free card machine\n• Very competitive processing rates\n• Free on-device POS\n• Simple and efficient Pay-by-Link & MOTO for card-not-present transactions\n• 24/7 UK-based phone support\n• Real-time reporting via a mobile app\n• Additional revenue through on-terminal advertising\n• Access to capital funding when needed\n• Post-purchase customer insights\n• Same-day setup in minutes\n\nI appreciate you may already have a strong incumbent in place, but it would be useful to run a quick comparison against your current setup — we often uncover small changes that make a noticeable difference both commercially and operationally.\n\nAre you around for a quick call this week to take a look?\n\nBest regards,\nJoseph Allison – Senior Sales Manager\nE: joseph@yetipay.me\nM: 07521431294\nW: www.yetipay.me\n17 St Anne's Court, London, W1F 0BQ"
+  },
+  "Cornwall D0 - Save on Rates": {
+    "subject": "{{firstname}} — quick one on {{company}}'s card rates",
+    "body": "Hi {{firstname}},\n\n{{personal_hook}}\n\nReason I'm reaching out — we're helping a load of Cornwall operators trim card fees ahead of the summer rush. Typically saving 0.3–0.6% on processing vs Worldpay/Stripe/Square, plus free on-device POS thrown in.\n\nWorth a quick look against {{company}}'s current statement? Takes me 5 min to run the comparison.\n\nFree to jump on a 10 min call Tues or Wed?\n\nCheers,\nJoseph\nyetipay"
+  },
+  "Cornwall D3 - Bump": {
+    "subject": "Re: {{firstname}} — quick one on {{company}}'s card rates",
+    "body": "Hi {{firstname}},\n\nBumping this in case it got buried before the weekend.\n\nQuick context — last three Cornwall venues we ran a comparison for saved between £180 and £420/month on processing alone. {{category_hook}}\n\nHappy to ping over the like-for-like in writing if a call's tricky — just need a recent statement screenshot.\n\nCheers,\nJoseph"
+  },
+  "Cornwall D7 - Breakup": {
+    "subject": "Should I close the file on {{company}}?",
+    "body": "Hi {{firstname}},\n\nNot heard back so I'll assume the timing isn't right — totally fair.\n\nIf I'm wrong and you'd like the rate comparison, one line back and I'll send it over today.\n\nOtherwise I'll leave you to the {{seasonal_hook}}.\n\nCheers,\nJoseph\nyetipay"
+  },
+  "FAO Cold intro": {
+    "subject": "FAO: {{firstname}} - Card Machine + free POS and Website",
+    "body": "Hi {{firstname}},\n\nWe're currently working with a number of businesses who are feeling the squeeze from rising wages, supplier costs, and increasing business rates.\n\nAs part of our payments bundle, we're helping operators streamline their setup, reduce costs, and unlock additional value, including:\n\n\u2022 Free on-device POS\n\u2022 Free website hosting with ongoing management\n\u2022 Simple and efficient Pay-by-Link & MOTO for card-not-present transactions\n\u2022 24/7 UK-based phone support\n\u2022 Real-time reporting via a mobile app\n\u2022 Additional revenue through on-terminal advertising\n\u2022 Access to capital funding when needed\n\u2022 Post-purchase customer insights\n\u2022 Same-day setup in minutes\n\nI appreciate you may already have a strong incumbent in place, but it would be useful to run a quick comparison against your current setup, we often uncover small changes that make a noticeable difference both commercially and operationally.\n\nAre you around for a quick call this week to take a look?\n\nBest regards,\nJoseph Allison - Senior Sales Manager\nE: joseph@yetipay.me\nM: 07521431294\nW: www.yetipay.me\n17 St Anne's Court, London, W1F 0BQ"
+  }
+}

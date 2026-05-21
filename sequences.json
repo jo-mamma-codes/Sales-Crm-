@@ -1,0 +1,52 @@
+{
+  "Cold outreach": {
+    "steps": [
+      {
+        "day": 0,
+        "template": "Cold intro",
+        "channel": "email"
+      },
+      {
+        "day": 2,
+        "template": null,
+        "channel": "call"
+      },
+      {
+        "day": 4,
+        "template": "Follow-up 1",
+        "channel": "email"
+      },
+      {
+        "day": 7,
+        "template": null,
+        "channel": "call"
+      },
+      {
+        "day": 10,
+        "template": "Follow-up 2",
+        "channel": "email"
+      }
+    ]
+  },
+  "Cornwall save-on-rates": {
+    "steps": [
+      { "day": 0, "template": "Cornwall D0 - Save on Rates", "channel": "email" },
+      { "day": 3, "template": "Cornwall D3 - Bump", "channel": "email" },
+      { "day": 7, "template": "Cornwall D7 - Breakup", "channel": "email" }
+    ]
+  },
+  "Referral": {
+    "steps": [
+      {
+        "day": 0,
+        "template": "Referral ask",
+        "channel": "email"
+      },
+      {
+        "day": 5,
+        "template": null,
+        "channel": "call"
+      }
+    ]
+  }
+}
