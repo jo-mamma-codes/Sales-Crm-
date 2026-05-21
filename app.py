@@ -3046,6 +3046,15 @@ if _active_page == "sequences":
 
     if seq_sub == "Today's tasks":
         st.subheader("Sequence tasks due today")
+        # Auto-open Gmail tab if user just clicked a row
+        if st.session_state.get("_seq_auto_open"):
+            _open_url = st.session_state.pop("_seq_auto_open")
+            import streamlit.components.v1 as components
+            components.html(
+                f'<script>window.open({json.dumps(_open_url)}, "_blank");</script>'
+                f'<div style="font-size:13px;color:#10b981;padding:8px;">Opening Gmail tab... if blocked, click the row again after allowing popups.</div>',
+                height=40,
+            )
         # Auto-mark sent when user clicks a Gmail link (link's onclick sets ?seq_opened=N)
         _qp = st.query_params
         _opened_idx = _qp.get("seq_opened")
@@ -3299,38 +3308,27 @@ if _active_page == "sequences":
                         if i in sent_set:
                             continue
                         else:
-                            lc1, lc2, lc3, lc4 = st.columns([3, 3, 1, 1])
-                            # st.markdown renders in main page (not iframe) → onclick can modify parent URL
-                            onclick = f"setTimeout(function(){{var u=new URL(window.location.href);u.searchParams.set('seq_opened','{i}');u.searchParams.set('seq_ts',Date.now());window.location.href=u.toString();}},400);"
-                            lc1.markdown(
-                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                f'onclick="{onclick}" '
-                                f'style="color:#7c3aed;text-decoration:none;font-size:14px;font-weight:600;">'
-                                f'✉ {html_mod.escape(lnk["business"])}</a>',
-                                unsafe_allow_html=True,
-                            )
-                            lc2.markdown(
-                                f'<a href="{html_mod.escape(lnk["link"])}" target="_blank" rel="noopener" '
-                                f'onclick="{onclick}" '
-                                f'style="color:#64748b;text-decoration:none;font-size:12px;">'
-                                f'{html_mod.escape(lnk["email"])}</a>',
-                                unsafe_allow_html=True,
-                            )
-                            if lc4.button("🚫", key=f"seq_bdne_{i}", help="Skip — mark task skipped"):
+                            lc1, lc2, lc3 = st.columns([5, 2, 1])
+                            # Streamlit button — clicking marks as sent + opens Gmail tab via JS popup
+                            with lc1:
+                                if st.button(f"✉ {lnk['business']} — {lnk['email']}", key=f"seq_open_{i}", use_container_width=True):
+                                    # Mark sent in DB
+                                    tracker = load_send_counts()
+                                    sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                    log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
+                                    lead_row = df[df["id"] == str(lnk["lead_id"])]
+                                    updates = {"last_touch": date.today().isoformat()}
+                                    if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                        updates["stage"] = "Contacted"
+                                    save_lead(lnk["lead_id"], updates)
+                                    tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
+                                    save_send_counts(tracker)
+                                    st.session_state["seq_bulk_sent"].add(i)
+                                    # Queue Gmail URL to auto-open on next rerun
+                                    st.session_state["_seq_auto_open"] = lnk["link"]
+                                    st.rerun()
+                            if lc2.button("🚫", key=f"seq_skip_{i}", help="Skip this task"):
                                 sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
-                                st.rerun()
-                            if lc3.button("Sent ✓", key=f"seq_bsent_{i}"):
-                                tracker = load_send_counts()
-                                sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
-                                log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
-                                lead_row = df[df["id"] == str(lnk["lead_id"])]
-                                updates = {"last_touch": date.today().isoformat()}
-                                if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
-                                    updates["stage"] = "Contacted"
-                                save_lead(lnk["lead_id"], updates)
-                                tracker["counts"][lnk["sender"]] = tracker["counts"].get(lnk["sender"], 0) + 1
-                                save_send_counts(tracker)
-                                st.session_state["seq_bulk_sent"].add(i)
                                 st.rerun()
 
                     st.divider()
