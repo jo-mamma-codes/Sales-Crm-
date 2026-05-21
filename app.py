@@ -3029,44 +3029,176 @@ if _active_page == "sequences":
             if today_q.empty:
                 st.success("All caught up. No sequence tasks due.")
             else:
-                for i, (_, task) in enumerate(today_q.iterrows()):
+                # Build email and call task lists
+                email_tasks = []
+                call_tasks = []
+                tracker = load_send_counts()
+                sender_counts = {s["email"]: tracker["counts"].get(s["email"], 0) for s in SENDERS}
+
+                for _, task in today_q.iterrows():
                     seq_def = sequences.get(task["sequence_name"], {})
                     steps = seq_def.get("steps", [])
                     step_idx = int(task["step"])
                     step = steps[step_idx] if step_idx < len(steps) else {}
                     channel = step.get("channel", "?")
                     tmpl_name = step.get("template")
-
                     lead_row = df[df["id"] == task["lead_id"]]
                     if lead_row.empty:
                         continue
                     lead = lead_row.iloc[0].to_dict()
 
-                    with st.container():
-                        col1, col2, col3 = st.columns([3, 2, 1])
-                        col1.markdown(f"**{task['business_name']}** — Step {step_idx + 1}: **{channel.upper()}**")
-                        if channel == "email" and tmpl_name and tmpl_name in templates:
-                            s, b = render_template(templates[tmpl_name], lead)
-                            col2.markdown(f"[Open Gmail]({gmail_link(lead['email'], s, b)})")
-                        elif channel == "call" and lead.get("phone"):
-                            col2.markdown(f"[Call {lead['phone']}](tel:{lead['phone']})")
-                        if col3.button("Done", key=f"seq_done_{i}"):
-                            sb.table("sequence_queue").update({"status": "done"}).eq(
-                                "lead_id", int(task["lead_id"])
-                            ).eq("sequence_name", task["sequence_name"]).eq(
-                                "step", int(task["step"])
-                            ).execute()
-                            if channel == "email" and tmpl_name and tmpl_name in templates:
-                                s, b = render_template(templates[tmpl_name], lead)
-                                log_activity(lead["id"], lead["business_name"], "email", s, b)
-                            elif channel == "call":
-                                log_activity(lead["id"], lead["business_name"], "call", f"Sequence {task['sequence_name']} step {step_idx+1}", "")
-                            updates = {"last_touch": date.today().isoformat()}
-                            if lead.get("stage") == "New":
-                                updates["stage"] = "Contacted"
-                            save_lead(task["lead_id"], updates)
+                    if channel == "email" and tmpl_name and tmpl_name in templates and lead.get("email"):
+                        # Assign sender via rotation respecting daily caps
+                        sender = None
+                        for s in SENDERS:
+                            if sender_counts[s["email"]] < s["daily_cap"]:
+                                sender = s
+                                break
+                        if not sender:
+                            continue
+                        subj, body = render_template(templates[tmpl_name], lead, sender_email=sender["email"])
+                        email_tasks.append({
+                            "task_key": f"{task['lead_id']}_{task['sequence_name']}_{step_idx}",
+                            "lead_id": task["lead_id"], "business": task["business_name"],
+                            "email_addr": lead["email"], "subject": subj, "body": body,
+                            "sender": sender["email"], "sequence_name": task["sequence_name"], "step": step_idx,
+                            "gmail_link": gmail_link(lead["email"], subj, body, sender_email=sender["email"]),
+                        })
+                        sender_counts[sender["email"]] += 1
+                    elif channel == "call":
+                        call_tasks.append({
+                            "task_key": f"{task['lead_id']}_{task['sequence_name']}_{step_idx}",
+                            "lead_id": task["lead_id"], "business": task["business_name"],
+                            "phone": lead.get("phone", ""), "sequence_name": task["sequence_name"], "step": step_idx,
+                        })
+
+                # ─── Top toolbar: sender summary + bulk actions ───
+                st.markdown("### 📧 Email tasks")
+                if email_tasks:
+                    # Sender rotation summary
+                    sender_summary = []
+                    for s in SENDERS:
+                        used = tracker["counts"].get(s["email"], 0)
+                        remaining = s["daily_cap"] - used
+                        sender_summary.append(f"**{s['email']}**: {used}/{s['daily_cap']} ({remaining} left)")
+                    st.caption(" · ".join(sender_summary))
+
+                    # Bulk open & sent-check toolbar
+                    tc1, tc2, tc3, tc4 = st.columns([1, 1, 1, 1])
+                    if "_seq_opened" not in st.session_state:
+                        st.session_state["_seq_opened"] = set()
+                    if "_seq_sent" not in st.session_state:
+                        st.session_state["_seq_sent"] = set()
+
+                    n_open = tc1.number_input("Open at once", 1, 50, 20, key="seq_open_n")
+                    if tc2.button(f"📨 Open next {n_open}", type="primary", key="seq_bulk_open"):
+                        unopened = [t for t in email_tasks if t["task_key"] not in st.session_state["_seq_opened"] and t["task_key"] not in st.session_state["_seq_sent"]]
+                        to_open = unopened[:int(n_open)]
+                        if to_open:
+                            # JS: open each link in new tab (browser-side, works on cloud)
+                            import streamlit.components.v1 as components
+                            js_links = "".join(f'window.open({json.dumps(t["gmail_link"])}, "_blank");\n' for t in to_open)
+                            components.html(f"<script>{js_links}</script>", height=0)
+                            for t in to_open:
+                                st.session_state["_seq_opened"].add(t["task_key"])
+                            st.success(f"Opened {len(to_open)} Gmail tabs. If popup blocker fired, allow popups for this site and click again.")
+
+                    if tc3.button("🔍 Check Gmail (mark sent)", key="seq_check_gmail"):
+                        try:
+                            from gmail_auth import check_sent_emails
+                            # Group recipients by sender
+                            by_sender = {}
+                            for t in email_tasks:
+                                if t["task_key"] not in st.session_state["_seq_sent"]:
+                                    by_sender.setdefault(t["sender"], []).append(t)
+                            marked = 0
+                            for sender_email, tasks in by_sender.items():
+                                recipients = [t["email_addr"] for t in tasks]
+                                found = check_sent_emails(recipients, hours_back=48, sender_email=sender_email)
+                                for t in tasks:
+                                    if t["email_addr"].lower() in found:
+                                        # Mark sent in DB, log activity, advance sequence
+                                        sb.table("sequence_queue").update({"status": "done"}).eq(
+                                            "lead_id", int(t["lead_id"])
+                                        ).eq("sequence_name", t["sequence_name"]).eq("step", t["step"]).execute()
+                                        log_activity(t["lead_id"], t["business"], "email", t["subject"], t["body"])
+                                        updates = {"last_touch": date.today().isoformat()}
+                                        lead_row = df[df["id"] == str(t["lead_id"])]
+                                        if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                            updates["stage"] = "Contacted"
+                                        save_lead(t["lead_id"], updates)
+                                        # Update send tracker
+                                        tracker["counts"][t["sender"]] = tracker["counts"].get(t["sender"], 0) + 1
+                                        save_send_counts(tracker)
+                                        st.session_state["_seq_sent"].add(t["task_key"])
+                                        marked += 1
+                            st.session_state["_last_check_msg"] = f"✅ Found {marked} sent emails via Gmail check"
                             st.rerun()
-                        st.divider()
+                        except Exception as e:
+                            st.error(f"Gmail check failed: {e}. Make sure gmail_token.json exists and Gmail auth is set up.")
+
+                    if tc4.button("🔄 Reset opened/sent", key="seq_reset"):
+                        st.session_state["_seq_opened"] = set()
+                        st.session_state["_seq_sent"] = set()
+                        st.rerun()
+
+                    if st.session_state.get("_last_check_msg"):
+                        st.success(st.session_state["_last_check_msg"])
+                        del st.session_state["_last_check_msg"]
+
+                    # Render tasks grouped by sender
+                    current_sender = None
+                    for t in email_tasks:
+                        if t["sender"] != current_sender:
+                            current_sender = t["sender"]
+                            st.markdown(f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;margin:16px 0 8px;padding:8px 12px;background:#f8f9fb;border-radius:8px;border-left:3px solid #7c3aed;">From: {html_mod.escape(current_sender)}</div>', unsafe_allow_html=True)
+                        col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                        is_sent = t["task_key"] in st.session_state["_seq_sent"]
+                        is_opened = t["task_key"] in st.session_state["_seq_opened"]
+                        status = "✅" if is_sent else ("📨" if is_opened else "·")
+                        col1.markdown(f"{status} **{t['business']}**")
+                        col2.markdown(f"<a href='{t['gmail_link']}' target='_blank' style='color:#7c3aed;font-size:12px;'>{t['email_addr']}</a>", unsafe_allow_html=True)
+                        if col3.button("Sent ✓", key=f"seq_sent_{t['task_key']}", disabled=is_sent):
+                            sb.table("sequence_queue").update({"status": "done"}).eq(
+                                "lead_id", int(t["lead_id"])
+                            ).eq("sequence_name", t["sequence_name"]).eq("step", t["step"]).execute()
+                            log_activity(t["lead_id"], t["business"], "email", t["subject"], t["body"])
+                            updates = {"last_touch": date.today().isoformat()}
+                            lead_row = df[df["id"] == str(t["lead_id"])]
+                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                updates["stage"] = "Contacted"
+                            save_lead(t["lead_id"], updates)
+                            tracker["counts"][t["sender"]] = tracker["counts"].get(t["sender"], 0) + 1
+                            save_send_counts(tracker)
+                            st.session_state["_seq_sent"].add(t["task_key"])
+                            st.rerun()
+                        if col4.button("Skip", key=f"seq_skip_{t['task_key']}"):
+                            sb.table("sequence_queue").update({"status": "skipped"}).eq(
+                                "lead_id", int(t["lead_id"])
+                            ).eq("sequence_name", t["sequence_name"]).eq("step", t["step"]).execute()
+                            st.rerun()
+                else:
+                    st.info("No email tasks due.")
+
+                # ─── Call tasks ───
+                if call_tasks:
+                    st.markdown("### 📞 Call tasks")
+                    for t in call_tasks:
+                        col1, col2, col3 = st.columns([3, 2, 1])
+                        col1.markdown(f"**{t['business']}**")
+                        if t["phone"]:
+                            col2.markdown(f"<a href='tel:{t['phone']}'>{t['phone']}</a>", unsafe_allow_html=True)
+                        if col3.button("Done", key=f"seq_call_done_{t['task_key']}"):
+                            sb.table("sequence_queue").update({"status": "done"}).eq(
+                                "lead_id", int(t["lead_id"])
+                            ).eq("sequence_name", t["sequence_name"]).eq("step", t["step"]).execute()
+                            log_activity(t["lead_id"], t["business"], "call", f"Sequence {t['sequence_name']} step {t['step']+1}", "")
+                            updates = {"last_touch": date.today().isoformat()}
+                            lead_row = df[df["id"] == str(t["lead_id"])]
+                            if not lead_row.empty and lead_row.iloc[0]["stage"] == "New":
+                                updates["stage"] = "Contacted"
+                            save_lead(t["lead_id"], updates)
+                            st.rerun()
 
     elif seq_sub == "Enroll leads":
         st.subheader("Enroll leads into sequence")
