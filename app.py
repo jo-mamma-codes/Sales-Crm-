@@ -3185,9 +3185,18 @@ if _active_page == "sequences":
         if seq_q.empty:
             st.info("No leads enrolled in sequences yet.")
         else:
-            today_q = seq_q[(seq_q["due_date"] <= date.today().isoformat()) & (seq_q["status"] == "pending")]
+            # Time-window toggle — lets user override due_date and send next step early
+            _tw1, _tw2 = st.columns([3, 2])
+            show_all_pending = _tw1.checkbox("Show ALL pending tasks (ignore due date — lets you send follow-ups early)",
+                                              value=False, key="seq_show_all_pending",
+                                              help="Off = only show tasks due today or earlier. On = show every pending step including future ones.")
+            if show_all_pending:
+                today_q = seq_q[seq_q["status"] == "pending"]
+                _tw2.caption(f"⚠️ Showing all {len(today_q)} pending tasks (including future steps)")
+            else:
+                today_q = seq_q[(seq_q["due_date"] <= date.today().isoformat()) & (seq_q["status"] == "pending")]
             if today_q.empty:
-                st.success("All caught up. No sequence tasks due.")
+                st.success("All caught up. No sequence tasks due. Toggle 'Show ALL pending' above to send follow-ups early.")
             else:
                 # ─── Build links list (mirror Outreach.bulk_links structure) ───
                 tracker = load_send_counts()
