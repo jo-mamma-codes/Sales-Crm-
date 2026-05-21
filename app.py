@@ -1865,8 +1865,25 @@ if _active_page == "pipeline":
         _new_stages = [s.strip() for s in _new_text.strip().split("\n") if s.strip()]
         if st.button("Save Stages", type="primary", use_container_width=True, key="save_stages_btn"):
             _p = load_pipelines()
+            _old_stages = _p.get(active_pipeline, [])
             _p[active_pipeline] = _new_stages
             save_pipelines(_p)
+            # Remap leads whose stage was renamed (match by position)
+            if len(_old_stages) == len(_new_stages):
+                for old_s, new_s in zip(_old_stages, _new_stages):
+                    if old_s != new_s:
+                        try:
+                            sb.table("leads").update({"stage": new_s}).eq("stage", old_s).eq("pipeline", active_pipeline).execute()
+                        except Exception:
+                            pass
+            else:
+                # Stage count changed — move orphaned leads to first new stage
+                _orphans = set(_old_stages) - set(_new_stages)
+                for orphan in _orphans:
+                    try:
+                        sb.table("leads").update({"stage": _new_stages[0]}).eq("stage", orphan).eq("pipeline", active_pipeline).execute()
+                    except Exception:
+                        pass
             st.session_state["_stages_saved"] = True
         st.divider()
         st.caption("Add new pipeline")
