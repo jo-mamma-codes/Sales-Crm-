@@ -40,10 +40,19 @@ def _token_file(email=None):
 
 
 def get_gmail_service(sender_email=None):
-    """Get Gmail API service. Uses single master token (joseph.allison).
-    sender_email param kept for future multi-token support but currently ignored.
+    """Get Gmail API service for sender_email.
+
+    Tries per-sender token first (gmail_token_<email>.json), falls back to master.
     """
-    token_path = _token_file(None)  # Always use master token
+    # Prefer per-sender token if it exists
+    if sender_email:
+        per_sender_path = _token_file(sender_email)
+        if per_sender_path.exists():
+            token_path = per_sender_path
+        else:
+            token_path = _token_file(None)
+    else:
+        token_path = _token_file(None)
 
     creds = None
     if token_path.exists():
