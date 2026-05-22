@@ -1,6 +1,7 @@
 """Yetipay solo CRM — Streamlit dashboard (Supabase backend)."""
 import html as html_mod
 import os
+import re
 import json
 import urllib.parse
 from dotenv import load_dotenv
@@ -412,8 +413,39 @@ def gmail_link(to, subject, body, sender_email=None):
     return url
 
 
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def validate_email_send(to_email, subject, body):
+    """Pre-send sanity checks. Returns (ok: bool, error_msg: str).
+
+    Catches: missing @, malformed addr, empty subject, body still has
+    unrendered {{tokens}}, generic inbox aliases (info@, hello@, etc).
+    """
+    e = (to_email or "").strip()
+    if not e or "@" not in e:
+        return False, "Missing or malformed recipient email"
+    if not _EMAIL_RE.match(e):
+        return False, f"Email syntax looks wrong: {e}"
+    if not subject or not subject.strip():
+        return False, "Subject is empty"
+    if "{{" in body or "}}" in body or "{{" in subject or "}}" in subject:
+        return False, "Unrendered {{token}} found in subject or body — template variable missing"
+    el = e.lower()
+    generic = ("info@", "hello@", "contact@", "enquiries@", "admin@", "sales@", "office@", "reception@", "bookings@", "noreply@", "no-reply@")
+    if any(el.startswith(g) for g in generic):
+        return False, f"Generic inbox address ({el.split('@')[0]}@) — skip cold outreach to these"
+    return True, ""
+
+
 def send_via_resend(from_email, from_name, to_email, subject, body):
-    """Send via Resend API. Returns (success: bool, message_id_or_error: str)."""
+    """Send via Resend API. Returns (success: bool, message_id_or_error: str).
+
+    Pre-validates email syntax + subject/body sanity before calling Resend.
+    """
+    ok, err = validate_email_send(to_email, subject, body)
+    if not ok:
+        return False, f"Validation failed: {err}"
     api_key = os.environ.get("RESEND_API_KEY") or st.secrets.get("RESEND_API_KEY", "")
     if not api_key:
         return False, "RESEND_API_KEY not configured"
@@ -1838,6 +1870,13 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                         _color = "#94a3b8"
                     _seq_html_parts.append(f'<div style="font-size:12px;margin-bottom:6px;"><strong>{html_mod.escape(sn)}</strong><br><span style="color:{_color};">{_label}</span></div>')
                 st.markdown(f'<div class="profile-sidebar-card"><h4>Sequences</h4>{"".join(_seq_html_parts)}</div>', unsafe_allow_html=True)
+                # Cancel buttons per sequence (if pending)
+                for sn, rows in _by_seq.items():
+                    if any(r["status"] == "pending" for r in rows):
+                        if st.button(f"⏸️ Cancel pending in '{sn}'", key=f"pv_cancel_seq_{sn}", help="Marks all pending steps as cancelled. Past sends remain on record."):
+                            sb.table("sequence_queue").update({"status": "cancelled"}).eq("lead_id", int(lead_id)).eq("sequence_name", sn).eq("status", "pending").execute()
+                            st.success(f"Cancelled pending steps in '{sn}'")
+                            st.rerun()
         except Exception:
             pass
 
@@ -2799,6 +2838,28 @@ if _active_page == "today":
     today = date.today().isoformat()
     due = df[(df["next_action_date"] <= today) & (df["next_action_date"] != "")
              & (~df["stage"].isin(["Won", "Lost"]))]
+
+    # Sequence tasks summary
+    _seq_q_today = load_seq_queue()
+    _seq_today_count = 0
+    if not _seq_q_today.empty:
+        _seq_today_count = len(_seq_q_today[(_seq_q_today["due_date"] <= today) & (_seq_q_today["status"] == "pending")])
+
+    # Activity today
+    _act_today = load_activity()
+    _today_sends = 0
+    if not _act_today.empty and "date" in _act_today.columns:
+        _at = _act_today[_act_today["type"] == "email"].copy()
+        _at["_d"] = pd.to_datetime(_at["date"], errors="coerce")
+        _today_sends = len(_at[_at["_d"] >= pd.Timestamp.now().normalize()])
+
+    # Today header with quick stats
+    ts1, ts2, ts3 = st.columns(3)
+    ts1.metric("Manual next-actions due", len(due))
+    ts2.metric("Sequence emails due", _seq_today_count)
+    ts3.metric("Emails sent today", _today_sends)
+
+    st.divider()
     st.subheader(f"Due today or overdue ({len(due)})")
     if due.empty:
         st.markdown("""<div style="text-align:center;padding:48px 24px;">
@@ -3252,6 +3313,24 @@ if _active_page == "followup":
 if _active_page == "tasks":
     st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Task Manager</div>
     <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Track follow-ups, calls, and to-dos across all leads</div>""", unsafe_allow_html=True)
+
+    # Sequence due-today count at top
+    _seq_q_tasks = load_seq_queue()
+    _seqs_for_tasks = load_sequences()
+    if not _seq_q_tasks.empty:
+        _seq_due_today = _seq_q_tasks[(_seq_q_tasks["due_date"] <= date.today().isoformat()) & (_seq_q_tasks["status"] == "pending")]
+        if not _seq_due_today.empty:
+            _email_steps = 0
+            _call_steps = 0
+            for _, t in _seq_due_today.iterrows():
+                _sd = _seqs_for_tasks.get(t["sequence_name"], {})
+                _steps = _sd.get("steps", [])
+                _si = int(t["step"]) if t["step"] is not None else 0
+                if _si < len(_steps):
+                    _ch = _steps[_si].get("channel", "")
+                    if _ch == "email": _email_steps += 1
+                    elif _ch == "call": _call_steps += 1
+            st.info(f"📬 **{len(_seq_due_today)} sequence tasks due today**: {_email_steps} email · {_call_steps} call. Open the **🔗 Sequences** page → Today's tasks tab.")
 
     all_tasks = load_tasks()
     today_dt = date.today()
@@ -4376,6 +4455,44 @@ if _active_page == "reports":
     else:
         st.markdown("""<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Reports & Analytics</div>
         <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Pipeline health, conversion rates, and activity trends</div>""", unsafe_allow_html=True)
+
+        # ── Today's digest ──
+        st.markdown("### 📅 Today's Activity")
+        _act_rep = load_activity()
+        _td_start = pd.Timestamp.now().normalize()
+        _emails_t = _calls_t = _notes_t = 0
+        if not _act_rep.empty and "date" in _act_rep.columns and "type" in _act_rep.columns:
+            _at = _act_rep.copy()
+            _at["_d"] = pd.to_datetime(_at["date"], errors="coerce")
+            _today_acts = _at[_at["_d"] >= _td_start]
+            _emails_t = len(_today_acts[_today_acts["type"] == "email"])
+            _calls_t = len(_today_acts[_today_acts["type"] == "call"])
+            _notes_t = len(_today_acts[_today_acts["type"] == "note"])
+
+        # Events today
+        _delivered_t = _bounced_t = _opened_t = _replied_t = 0
+        try:
+            _ev_today = sb.table("email_events").select("event_type").gte("occurred_at", _td_start.isoformat()).execute()
+            for e in _ev_today.data or []:
+                et = e.get("event_type", "")
+                if et == "delivered": _delivered_t += 1
+                elif et == "bounced": _bounced_t += 1
+                elif et == "opened": _opened_t += 1
+                elif et == "replied": _replied_t += 1
+        except Exception:
+            pass
+
+        td1, td2, td3, td4 = st.columns(4)
+        td1.metric("📨 Emails sent", _emails_t)
+        td2.metric("📞 Calls logged", _calls_t)
+        td3.metric("✅ Delivered", _delivered_t, help="From Resend webhooks")
+        td4.metric("⚠️ Bounced", _bounced_t, help="From Resend webhooks")
+        td5, td6, td7, td8 = st.columns(4)
+        td5.metric("👁 Opened (unique)", _opened_t, help="From Resend webhooks")
+        td6.metric("💬 Replied", _replied_t)
+        td7.metric("📝 Notes", _notes_t)
+        td8.metric("New leads", len(df[df["created"] == date.today().isoformat()]) if "created" in df.columns else 0)
+        st.divider()
 
         # ── Sequence Performance ──
         _seq_q_rep = load_seq_queue()
