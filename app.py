@@ -1799,6 +1799,36 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div style="font-size:12px;color:#64748b;white-space:pre-wrap;line-height:1.5;">{esc(_notes_preview)}</div>
         </div>""", unsafe_allow_html=True)
 
+        # Active / past sequences for this lead
+        try:
+            _lead_seq = sb.table("sequence_queue").select("*").eq("lead_id", int(lead_id)).execute()
+            if _lead_seq.data:
+                _by_seq = {}
+                for row in _lead_seq.data:
+                    _by_seq.setdefault(row["sequence_name"], []).append(row)
+                _seq_html_parts = []
+                for sn, rows in _by_seq.items():
+                    _done = sum(1 for r in rows if r["status"] == "done")
+                    _pending = sum(1 for r in rows if r["status"] == "pending")
+                    _replied = sum(1 for r in rows if r["status"] == "replied")
+                    _skipped = sum(1 for r in rows if r["status"] in ("skipped", "cancelled"))
+                    if _pending:
+                        _label = f"⏳ {_done}/{len(rows)} sent · {_pending} pending"
+                        _color = "#1d4ed8"
+                    elif _replied:
+                        _label = f"💬 replied · {_done}/{len(rows)} sent"
+                        _color = "#059669"
+                    elif _done == len(rows):
+                        _label = f"✅ completed ({_done}/{len(rows)})"
+                        _color = "#94a3b8"
+                    else:
+                        _label = f"⏭️ skipped/cancelled · {_done}/{len(rows)} sent"
+                        _color = "#94a3b8"
+                    _seq_html_parts.append(f'<div style="font-size:12px;margin-bottom:6px;"><strong>{html_mod.escape(sn)}</strong><br><span style="color:{_color};">{_label}</span></div>')
+                st.markdown(f'<div class="profile-sidebar-card"><h4>Sequences</h4>{"".join(_seq_html_parts)}</div>', unsafe_allow_html=True)
+        except Exception:
+            pass
+
         # Edit deal
         with st.expander("✏️ Edit Deal"):
             new_contact = st.text_input("Contact name", lead["contact_name"], key="pv_contact")
@@ -2253,6 +2283,15 @@ if _active_page == "pipeline":
     CARDS_DEFAULT = 8
     esc = html_mod.escape
 
+    # Pre-compute set of lead_ids currently in any active sequence (status=pending)
+    _in_seq_ids = set()
+    try:
+        _seq_q_kanban = load_seq_queue()
+        if not _seq_q_kanban.empty:
+            _in_seq_ids = set(str(x) for x in _seq_q_kanban[_seq_q_kanban["status"] == "pending"]["lead_id"].unique())
+    except Exception:
+        pass
+
     # Track expanded columns
     if "kanban_expanded" not in st.session_state:
         st.session_state["kanban_expanded"] = {}
@@ -2290,6 +2329,7 @@ if _active_page == "pipeline":
                 deal_html = f'<span style="color:#059669;font-weight:600;font-size:11px;">£{deal_val:,.0f}</span>' if deal_val > 0 else ""
                 cat_html = f'<span style="background:#f1f0ff;color:#7c3aed;font-size:9px;padding:1px 6px;border-radius:8px;">{cat}</span>' if cat and cat != "Other" else ""
                 score_html = f'<span style="color:{_sc_color};font-size:9px;font-weight:600;">{_sc_label}</span>'
+                seq_html = '<span style="background:#dbeafe;color:#1d4ed8;font-size:9px;padding:1px 6px;border-radius:8px;">🔗 in seq</span>' if str(row["id"]) in _in_seq_ids else ""
 
                 with st.container(border=True):
                     st.markdown(
@@ -2301,7 +2341,7 @@ if _active_page == "pipeline":
                     st.button(row["business_name"][:36], key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
                     st.markdown(
                         f'<div style="font-size:10px;color:#64748b;margin:-8px 0 2px;">{esc(row["contact_name"])} {score_html} {stale} {deal_html}</div>'
-                        f'<div style="display:flex;gap:4px;align-items:center;">{cat_html}'
+                        f'<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">{cat_html} {seq_html}'
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
