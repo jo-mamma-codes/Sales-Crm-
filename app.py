@@ -3572,10 +3572,25 @@ if _active_page == "sequences":
                 _skipped_no_sender = 0
                 _skipped_no_email = 0
                 _skipped_no_lead = 0
+                _skipped_no_template = 0
+                _skipped_template_missing = 0
+                _skipped_paused_seq = 0
+                _skipped_unknown_seq = 0
+                _skipped_other = 0
+                _missing_templates_set = set()
+                _paused_seqs_set = set()
                 links = []
                 call_tasks = []
                 for _, task in today_q.iterrows():
                     seq_def = sequences.get(task["sequence_name"], {})
+                    if not seq_def:
+                        _skipped_unknown_seq += 1
+                        continue
+                    # Skip paused sequences (also surface in diagnostic)
+                    if seq_def.get("paused"):
+                        _skipped_paused_seq += 1
+                        _paused_seqs_set.add(task["sequence_name"])
+                        continue
                     steps = seq_def.get("steps", [])
                     step_idx = int(task["step"])
                     step = steps[step_idx] if step_idx < len(steps) else {}
@@ -3588,11 +3603,18 @@ if _active_page == "sequences":
                         continue
                     lead = lead_row.iloc[0].to_dict()
 
-                    if channel == "email" and tmpl_name and tmpl_name in templates:
+                    if channel == "email":
+                        if not tmpl_name:
+                            _skipped_no_template += 1
+                            _missing_templates_set.add(f"{task['sequence_name']} step {step_idx+1}")
+                            continue
+                        if tmpl_name not in templates:
+                            _skipped_template_missing += 1
+                            _missing_templates_set.add(f"{tmpl_name} (not in templates)")
+                            continue
                         if not lead.get("email"):
                             _skipped_no_email += 1
                             continue
-                        # Skip DNC emails (bounced/unsubscribed) — auto-mark task done so it doesn't reappear
                         if lead["email"].lower() in _dnc_emails_t:
                             sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(task["lead_id"])).eq("sequence_name", task["sequence_name"]).eq("step", step_idx).execute()
                             _skipped_dnc += 1
@@ -3619,18 +3641,27 @@ if _active_page == "sequences":
                             "lead_id": task["lead_id"], "business": task["business_name"],
                             "phone": lead.get("phone", ""), "sequence_name": task["sequence_name"], "step": step_idx,
                         })
+                    else:
+                        _skipped_other += 1
 
                 # Diagnostic: show why tasks didn't make it to the link list
                 _total_due = len(today_q)
                 _total_shown = len(links) + len(call_tasks)
                 if _total_shown < _total_due:
                     _diag_parts = []
+                    if _skipped_no_template: _diag_parts.append(f"❗ {_skipped_no_template} have NO TEMPLATE assigned (edit sequence to pick one)")
+                    if _skipped_template_missing: _diag_parts.append(f"❗ {_skipped_template_missing} reference a template that doesn't exist")
+                    if _skipped_paused_seq: _diag_parts.append(f"⏸️ {_skipped_paused_seq} are in paused sequences ({', '.join(_paused_seqs_set)})")
+                    if _skipped_unknown_seq: _diag_parts.append(f"❗ {_skipped_unknown_seq} reference a sequence that doesn't exist")
                     if _skipped_dnc: _diag_parts.append(f"{_skipped_dnc} on DNC list (auto-skipped)")
                     if _skipped_no_email: _diag_parts.append(f"{_skipped_no_email} have no email")
                     if _skipped_no_sender: _diag_parts.append(f"{_skipped_no_sender} no sender capacity left today")
                     if _skipped_no_lead: _diag_parts.append(f"{_skipped_no_lead} lead record missing")
+                    if _skipped_other: _diag_parts.append(f"{_skipped_other} unknown channel")
                     if _diag_parts:
-                        st.warning(f"⚠️ {_total_due - _total_shown} of {_total_due} tasks not shown: " + " · ".join(_diag_parts))
+                        st.error(f"⚠️ {_total_due - _total_shown} of {_total_due} tasks NOT shown:\n\n- " + "\n- ".join(_diag_parts))
+                        if _missing_templates_set:
+                            st.warning(f"**Templates needed:** {', '.join(sorted(_missing_templates_set))}\n\nGo to **Manage sequences** → pick the sequence → assign a template to each step.")
 
                 # ─── Sender rotation summary (same as Outreach) ───
                 remaining_today = sum(s["daily_cap"] - tracker["counts"].get(s["email"], 0) for s in SENDERS)
