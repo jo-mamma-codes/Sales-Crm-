@@ -555,12 +555,25 @@ def mark_task_sent(lead_id, sequence_name, step, sender_email=None, message_id=N
     return changed
 
 
+def compute_due_date(days_offset, skip_weekends=True):
+    """Add days_offset to today. If skip_weekends, shift Sat/Sun to Mon."""
+    d = date.today() + pd.Timedelta(days=int(days_offset))
+    if skip_weekends:
+        # weekday(): Mon=0..Sun=6
+        wd = d.weekday()
+        if wd == 5:  # Sat → Mon
+            d = d + pd.Timedelta(days=2)
+        elif wd == 6:  # Sun → Mon
+            d = d + pd.Timedelta(days=1)
+    return d.isoformat()
+
+
 def enroll_lead(lead_id, business_name, seq_name, sequences):
     seq = sequences[seq_name]
     sb.table("sequence_queue").delete().eq("lead_id", int(lead_id)).eq("sequence_name", seq_name).execute()
     rows = []
     for i, step in enumerate(seq["steps"]):
-        due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+        due = compute_due_date(step["day"])
         rows.append({
             "lead_id": int(lead_id),
             "business_name": business_name,
@@ -3760,6 +3773,45 @@ if _active_page == "sequences":
                         st.session_state["seq_bulk_opened"] = set()
                         st.session_state["seq_bulk_sent"] = set()
                         st.rerun()
+                    if cc2.button("💬 Check Gmail for replies (auto-pause)", key="seq_b_check_replies", help="Scans inbox for replies from anyone with pending steps. Cancels their remaining sequence to avoid emailing someone who replied."):
+                        try:
+                            from gmail_auth import check_replies
+                            # Get pending leads across ALL sequences (broader than just this view's unsent links)
+                            all_pending = seq_q[seq_q["status"] == "pending"]
+                            if all_pending.empty:
+                                st.info("No pending leads to check")
+                            else:
+                                # Build email list per lead
+                                lead_emails = {}
+                                for _, prow in all_pending.iterrows():
+                                    _ld = df[df["id"].astype(str) == str(prow["lead_id"])]
+                                    if not _ld.empty and _ld.iloc[0].get("email"):
+                                        lead_emails[_ld.iloc[0]["email"].lower()] = int(prow["lead_id"])
+                                emails_list = list(lead_emails.keys())
+                                with st.spinner(f"Checking {len(emails_list)} emails for replies (last 7 days)..."):
+                                    replied = check_replies(emails_list, hours_back=168)
+                                if replied:
+                                    paused = 0
+                                    for em in replied:
+                                        lid = lead_emails.get(em.lower())
+                                        if lid:
+                                            # Cancel pending steps
+                                            sb.table("sequence_queue").update({"status": "replied"}).eq("lead_id", lid).eq("status", "pending").execute()
+                                            # Log reply event
+                                            try:
+                                                sb.table("email_events").insert({
+                                                    "lead_id": lid, "event_type": "replied",
+                                                    "source": "gmail", "recipient_email": em,
+                                                }).execute()
+                                            except Exception:
+                                                pass
+                                            paused += 1
+                                    st.success(f"💬 Found {len(replied)} replies → paused {paused} sequences (status=replied)")
+                                    st.rerun()
+                                else:
+                                    st.info("No replies found in last 7 days")
+                        except Exception as e:
+                            st.error(f"Reply check failed: {e}")
                 else:
                     st.info("No email tasks due.")
 
@@ -3936,7 +3988,7 @@ if _active_page == "sequences":
                 queue_rows = []
                 for lid, biz in lead_ids:
                     for i, step in enumerate(seq["steps"]):
-                        due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                        due = compute_due_date(step["day"])
                         queue_rows.append({
                             "lead_id": int(lid),
                             "business_name": biz,
@@ -4075,7 +4127,7 @@ if _active_page == "sequences":
                                 if existing.data:
                                     continue
                                 for i, step in enumerate(target_steps):
-                                    due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                                    due = compute_due_date(step["day"])
                                     queue_rows.append({
                                         "lead_id": lid,
                                         "business_name": biz,
@@ -4198,7 +4250,7 @@ if _active_page == "sequences":
                             for lid, group in pending.groupby("lead_id"):
                                 biz = group["business_name"].iloc[0]
                                 for i, step in enumerate(sequences[dup_name]["steps"]):
-                                    due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                                    due = compute_due_date(step["day"])
                                     new_rows.append({
                                         "lead_id": int(lid),
                                         "business_name": biz,
@@ -4217,7 +4269,31 @@ if _active_page == "sequences":
                         st.success(f"✅ Created '{dup_name}'" + (f" with {carried} carried enrollments" if carried else ""))
                         st.rerun()
 
-            if st.button("Delete sequence", type="secondary", key="seq_m_del"):
+            # ─── Pause / resume ───
+            _is_paused = bool(cur.get("paused"))
+            _seq_pending_count = len(seq_q[(seq_q["sequence_name"] == seq_pick) & (seq_q["status"] == "pending")]) if not seq_q.empty else 0
+            pr1, pr2 = st.columns([2, 4])
+            if _is_paused:
+                if pr1.button(f"▶️ Resume sequence ({_seq_pending_count} paused tasks)", type="primary", key="seq_m_resume"):
+                    cur["paused"] = False
+                    sequences[seq_pick] = cur
+                    save_sequences(sequences)
+                    sb.table("sequence_queue").update({"status": "pending"}).eq("sequence_name", seq_pick).eq("status", "paused").execute()
+                    st.success(f"Resumed '{seq_pick}' — pending tasks active again")
+                    st.rerun()
+                pr2.caption("⏸️ This sequence is paused — no leads will see new tasks until resumed.")
+            else:
+                if pr1.button(f"⏸️ Pause sequence ({_seq_pending_count} pending tasks)", key="seq_m_pause"):
+                    cur["paused"] = True
+                    sequences[seq_pick] = cur
+                    save_sequences(sequences)
+                    sb.table("sequence_queue").update({"status": "paused"}).eq("sequence_name", seq_pick).eq("status", "pending").execute()
+                    st.success(f"Paused '{seq_pick}' — pending tasks won't fire until resumed")
+                    st.rerun()
+                pr2.caption("Pausing parks pending tasks as 'paused'. Resume puts them back to pending.")
+
+            st.divider()
+            if st.button("🗑️ Delete sequence", type="secondary", key="seq_m_del"):
                 del sequences[seq_pick]
                 save_sequences(sequences)
                 seq_q = seq_q[seq_q["sequence_name"] != seq_pick]
