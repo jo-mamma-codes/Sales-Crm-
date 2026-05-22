@@ -610,6 +610,9 @@ def mark_task_sent(lead_id, sequence_name, step, sender_email=None, message_id=N
             }).execute()
         except Exception:
             pass  # email_events may not exist yet
+        log_audit("send", target_type="lead", target_id=lead_id, metadata={
+            "sequence": sequence_name, "step": step, "sender": sender_email, "source": source, "message_id": message_id,
+        })
     return changed
 
 
@@ -2564,6 +2567,7 @@ if _active_page == "contacts":
                     }).in_("id", batch).execute()
                 # Cancel pending sequence tasks for all of them
                 sb.table("sequence_queue").update({"status": "cancelled"}).in_("lead_id", _ids_dnc).eq("status", "pending").execute()
+                log_audit("bulk_dnc", target_type="leads", metadata={"count": len(_ids_dnc), "ids_sample": _ids_dnc[:20]})
                 load_crm.clear()
                 st.session_state.pop("_df_cache", None)
                 st.success(f"DNC'd {len(_ids_dnc)} leads + cancelled their pending sequence tasks")
