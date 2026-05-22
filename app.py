@@ -4399,11 +4399,19 @@ if _active_page == "sequences":
                 tm = sc3.selectbox(f"Step {si+1} template", ["(none)"] + list(templates.keys()), key=f"seq_m_tm{si}")
                 steps.append({"day": int(d), "channel": ch, "template": tm if tm != "(none)" else None})
             if st.button("Create sequence", type="primary", key="seq_m_create"):
-                if new_name:
-                    sequences[new_name] = {"steps": steps}
-                    save_sequences(sequences)
-                    st.success(f"Created '{new_name}'")
-                    st.rerun()
+                _clean_name = (new_name or "").strip()
+                if not _clean_name:
+                    st.error("Name required")
+                else:
+                    # Block near-duplicate names (case/whitespace insensitive)
+                    _existing_norm = {k.strip().lower(): k for k in sequences.keys()}
+                    if _clean_name.lower() in _existing_norm:
+                        st.error(f"❌ '{_clean_name}' duplicates existing sequence '{_existing_norm[_clean_name.lower()]}'. Edit that one or pick a different name.")
+                    else:
+                        sequences[_clean_name] = {"steps": steps}
+                        save_sequences(sequences)
+                        st.success(f"Created '{_clean_name}'")
+                        st.rerun()
         else:
             cur = sequences[seq_pick]
 
