@@ -1621,6 +1621,15 @@ if not _act_for_count.empty and "type" in _act_for_count.columns and "date" in _
     _today_start = pd.Timestamp.now().normalize()
     _emails_today_count = len(_email_today_df[_email_today_df["_d"] >= _today_start])
 
+# Sequence tasks due today (for sidebar)
+_seq_due_sidebar = 0
+try:
+    _seq_q_side = load_seq_queue()
+    if not _seq_q_side.empty:
+        _seq_due_sidebar = len(_seq_q_side[(_seq_q_side["due_date"] <= date.today().isoformat()) & (_seq_q_side["status"] == "pending")])
+except Exception:
+    pass
+
 # Quick stats in sidebar
 with st.sidebar:
     st.markdown(f"""<div style="border-top:1px solid #2d2d4a;padding:12px 16px;margin-top:8px;">
@@ -1632,9 +1641,13 @@ with st.sidebar:
             <span style="font-size:11px;color:#64648a;">Won</span>
             <span style="font-size:11px;color:#10b981;font-weight:600;">{len(df[df['stage']=='Won'])}/{cfg['target']}</span>
         </div>
-        <div style="display:flex;justify-content:space-between;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
             <span style="font-size:11px;color:#64648a;">Today's emails</span>
             <span style="font-size:11px;color:#fff;font-weight:600;">{_emails_today_count}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:11px;color:#64648a;">Seq due today</span>
+            <span style="font-size:11px;color:#fbbf24;font-weight:600;">{_seq_due_sidebar}</span>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -4398,12 +4411,22 @@ if _active_page == "sequences":
                                 st.markdown(f"**Subject:** `{_pv_s}`")
                                 st.code(_pv_b, language=None)
 
-                            if st.button(f"💾 Save template '{tm}'", key=f"seq_m_edit_tsave_{si}"):
+                            _save_col, _test_col = st.columns(2)
+                            if _save_col.button(f"💾 Save template '{tm}'", key=f"seq_m_edit_tsave_{si}"):
                                 templates[tm] = {"subject": t_subj, "body": t_body}
                                 save_templates(templates)
                                 load_templates.clear()
                                 log_audit("template_edit", target_type="template", target_id=tm)
                                 st.success(f"Template '{tm}' saved")
+                                st.rerun()
+                            if _test_col.button(f"🧪 Send test to me", key=f"seq_m_edit_ttest_{si}", help="Sends this template to joseph@yetipay.me via Resend"):
+                                _preview_l_t = df.iloc[0].to_dict() if not df.empty else {}
+                                _pv_s2, _pv_b2 = render_template({"subject": t_subj, "body": t_body}, _preview_l_t, sender_email="joseph.allison@yetipay.me")
+                                _ok_t, _msg_t = send_via_resend("joseph.allison@yetipay.me", "Joseph Allison", "joseph@yetipay.me", _pv_s2, _pv_b2)
+                                if _ok_t:
+                                    st.success(f"✅ Test sent! Check joseph@yetipay.me inbox. Message ID: {_msg_t[:20]}...")
+                                else:
+                                    st.error(f"❌ Test send failed: {_msg_t}")
                                 st.rerun()
 
                 save1, save2 = st.columns(2)
