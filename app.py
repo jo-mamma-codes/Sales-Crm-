@@ -4073,6 +4073,22 @@ if _active_page == "sequences":
                             save_lead(t["lead_id"], updates)
                             st.rerun()
 
+                # ─── Bottom: cancel ALL enrollments per sequence (quick exit) ───
+                st.divider()
+                st.markdown("### ❌ Cancel enrollments")
+                _seq_names_pending = seq_q[seq_q["status"] == "pending"]["sequence_name"].unique().tolist() if not seq_q.empty else []
+                if _seq_names_pending:
+                    cn1, cn2 = st.columns([3, 2])
+                    _cancel_target = cn1.selectbox("Pick sequence to cancel", _seq_names_pending, key="bottom_cancel_seq")
+                    _cancel_pending_n = len(seq_q[(seq_q["sequence_name"] == _cancel_target) & (seq_q["status"] == "pending")])
+                    if cn2.button(f"❌ Cancel {_cancel_pending_n} pending in '{_cancel_target}'", key="bottom_cancel_btn", type="primary"):
+                        sb.table("sequence_queue").update({"status": "cancelled"}).eq("sequence_name", _cancel_target).eq("status", "pending").execute()
+                        log_audit("seq_cancel_all", target_type="sequence", target_id=_cancel_target, metadata={"cancelled_count": _cancel_pending_n})
+                        st.success(f"Cancelled {_cancel_pending_n} pending tasks in '{_cancel_target}'")
+                        st.rerun()
+                else:
+                    st.caption("No pending sequence tasks to cancel.")
+
     elif seq_sub == "Enroll leads":
         st.subheader("Enroll leads into sequence")
         # Show last enroll result if any
