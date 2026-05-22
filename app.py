@@ -512,6 +512,49 @@ def save_seq_queue(q):
             sb.table("sequence_queue").insert(rows[i:i+batch_size]).execute()
 
 
+def mark_task_sent(lead_id, sequence_name, step, sender_email=None, message_id=None, source="manual"):
+    """Atomically mark a sequence_queue row as sent + log to email_events.
+
+    Returns True if status was actually changed from 'pending' (i.e. this was a real send,
+    not a duplicate). Returns False if already non-pending (idempotency guard).
+
+    Use this in place of raw sb.table('sequence_queue').update({'status':'done'})
+    so we record sent_at, sender_used, message_id consistently and ledger every event.
+    """
+    from datetime import datetime as _dt
+    updates = {
+        "status": "done",
+        "sent_at": _dt.now().isoformat(),
+    }
+    if sender_email:
+        updates["sender_used"] = sender_email
+    if message_id:
+        updates["message_id"] = message_id
+    try:
+        r = sb.table("sequence_queue").update(updates).eq("lead_id", int(lead_id)).eq("sequence_name", sequence_name).eq("step", int(step)).eq("status", "pending").execute()
+        changed = bool(r.data)
+    except Exception:
+        # Schema may not have new columns yet — fall back to status-only update
+        try:
+            r = sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lead_id)).eq("sequence_name", sequence_name).eq("step", int(step)).eq("status", "pending").execute()
+            changed = bool(r.data)
+        except Exception:
+            changed = False
+    if changed:
+        try:
+            sb.table("email_events").insert({
+                "lead_id": int(lead_id),
+                "sequence_name": sequence_name,
+                "step": int(step),
+                "event_type": "sent",
+                "source": source,
+                "message_id": message_id,
+            }).execute()
+        except Exception:
+            pass  # email_events may not exist yet
+    return changed
+
+
 def enroll_lead(lead_id, business_name, seq_name, sequences):
     seq = sequences[seq_name]
     sb.table("sequence_queue").delete().eq("lead_id", int(lead_id)).eq("sequence_name", seq_name).execute()
@@ -1964,40 +2007,76 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
     pb1, pb2, pb3 = st.columns([2, 2, 2])
     pb1.button("← Back to list", on_click=close_profile, key="pv_back_bottom", type="primary", use_container_width=True)
 
-    # DNC controls (file-based until schema migration)
-    _dnc_file_p = ROOT / "bounced_emails.json"
-    _dnc_data_p = {"bounced": [], "never_contact": []}
-    if _dnc_file_p.exists():
-        try:
-            _dnc_data_p = json.loads(_dnc_file_p.read_text())
-        except Exception:
-            pass
+    # DNC controls — DB-backed (leads.do_not_email + bounced + unsubscribed_at + bounced_at)
     _lead_email_l = (lead.get("email") or "").lower()
-    _is_dnc = _lead_email_l in [e.lower() for e in _dnc_data_p.get("bounced", []) + _dnc_data_p.get("never_contact", [])]
+    _is_dnc = bool(lead.get("do_not_email")) and lead.get("do_not_email") not in (False, "False", "false", "")
 
     if _is_dnc:
-        if pb2.button("✅ Remove from DNC list", key="pv_dnc_remove", use_container_width=True):
-            _dnc_data_p["bounced"] = [e for e in _dnc_data_p.get("bounced", []) if e.lower() != _lead_email_l]
-            _dnc_data_p["never_contact"] = [e for e in _dnc_data_p.get("never_contact", []) if e.lower() != _lead_email_l]
-            _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
-            st.success("Removed from DNC")
-            st.rerun()
+        if pb2.button("✅ Remove from DNC", key="pv_dnc_remove", use_container_width=True):
+            try:
+                sb.table("leads").update({
+                    "do_not_email": False,
+                    "bounced": False,
+                    "unsubscribed_at": None,
+                    "bounced_at": None,
+                }).eq("id", int(lead_id)).execute()
+                load_crm.clear()
+                st.session_state.pop("_df_cache", None)
+                st.success("Removed from DNC")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed: {e}. Run SUPABASE_SETUP_PHASE1.sql first.")
     else:
         if _lead_email_l and pb2.button("🚫 Mark Do Not Email", key="pv_dnc_add", use_container_width=True):
-            _dnc_data_p.setdefault("never_contact", []).append(_lead_email_l)
-            _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
-            # Cancel any pending sequence tasks for this lead
-            sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
-            st.success("Added to DNC + cancelled pending sequence steps")
-            st.rerun()
+            from datetime import datetime as _dt
+            try:
+                sb.table("leads").update({
+                    "do_not_email": True,
+                    "unsubscribed_at": _dt.now().isoformat(),
+                }).eq("id", int(lead_id)).execute()
+                # Cancel pending steps + log event
+                sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
+                try:
+                    sb.table("email_events").insert({
+                        "lead_id": int(lead_id),
+                        "event_type": "unsubscribed",
+                        "source": "manual",
+                        "recipient_email": _lead_email_l,
+                    }).execute()
+                except Exception:
+                    pass
+                load_crm.clear()
+                st.session_state.pop("_df_cache", None)
+                st.success("Added to DNC + cancelled pending sequence steps")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed: {e}. Run SUPABASE_SETUP_PHASE1.sql first.")
 
-    if _lead_email_l and pb3.button("⚠️ Mark bounced", key="pv_bounce_add", use_container_width=True, help="Email bounced — add to bounced list so we never retry"):
-        _dnc_data_p.setdefault("bounced", []).append(_lead_email_l)
-        _dnc_file_p.write_text(json.dumps(_dnc_data_p, indent=2))
-        sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
-        log_activity(lead_id, lead["business_name"], "bounce", "Email bounced (manual)", "")
-        st.success("Marked as bounced + cancelled pending steps")
-        st.rerun()
+    if _lead_email_l and pb3.button("⚠️ Mark bounced", key="pv_bounce_add", use_container_width=True, help="Email bounced — flag lead, cancel pending steps"):
+        from datetime import datetime as _dt
+        try:
+            sb.table("leads").update({
+                "do_not_email": True,
+                "bounced": True,
+                "bounced_at": _dt.now().isoformat(),
+            }).eq("id", int(lead_id)).execute()
+            sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lead_id)).eq("status", "pending").execute()
+            try:
+                sb.table("email_events").insert({
+                    "lead_id": int(lead_id),
+                    "event_type": "bounced",
+                    "source": "manual",
+                    "recipient_email": _lead_email_l,
+                }).execute()
+            except Exception:
+                pass
+            log_activity(lead_id, lead["business_name"], "bounce", "Email bounced (manual)", "")
+            load_crm.clear()
+            st.session_state.pop("_df_cache", None)
+            st.success("Marked as bounced + cancelled pending steps")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed: {e}. Run SUPABASE_SETUP_PHASE1.sql first.")
 
     st.stop()
 
@@ -3391,7 +3470,27 @@ if _active_page == "sequences":
                                 from_name = sender_info["name"] if sender_info else "Sales"
                                 ok, msg = send_via_resend(lnk["sender"], from_name, lnk["email"], lnk["subject"], lnk["body"])
                                 if ok:
-                                    sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                    # msg is the Resend message_id on success
+                                    from datetime import datetime as _dt
+                                    sb.table("sequence_queue").update({
+                                        "status": "done",
+                                        "sent_at": _dt.now().isoformat(),
+                                        "sender_used": lnk["sender"],
+                                        "message_id": msg,
+                                    }).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                    # Log to email_events ledger
+                                    try:
+                                        sb.table("email_events").insert({
+                                            "lead_id": int(lnk["lead_id"]),
+                                            "sequence_name": lnk["sequence_name"],
+                                            "step": int(lnk["step"]),
+                                            "event_type": "sent",
+                                            "source": "resend",
+                                            "message_id": msg,
+                                            "recipient_email": lnk["email"],
+                                        }).execute()
+                                    except Exception:
+                                        pass
                                     log_activity(lnk["lead_id"], lnk["business"], "email", lnk["subject"], lnk["body"])
                                     lead_row = df[df["id"] == str(lnk["lead_id"])]
                                     updates = {"last_touch": date.today().isoformat()}
@@ -3403,7 +3502,10 @@ if _active_page == "sequences":
                                     sent_ok += 1
                                 else:
                                     # Mark as failed so it can be retried later
-                                    sb.table("sequence_queue").update({"status": "failed"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                    sb.table("sequence_queue").update({
+                                        "status": "failed",
+                                        "last_error": str(msg)[:500],
+                                    }).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
                                     failed += 1
                                     errors.append(f"{lnk['business']}: {msg}")
                                 progress.progress(min(99, int((n+1) / len(to_send) * 100)), text=f"Sent {n+1}/{len(to_send)}...")
@@ -3524,10 +3626,9 @@ if _active_page == "sequences":
                             # Streamlit button — clicking marks as sent + opens Gmail tab via JS popup
                             with lc1:
                                 if st.button(f"✉ {lnk['business']} — {lnk['email']}", key=f"seq_open_{i}", use_container_width=True):
-                                    # IDEMPOTENT: only act if task is still pending. Returning UPDATE rows = 0 means already done.
-                                    _r = sb.table("sequence_queue").update({"status": "done"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).eq("status", "pending").execute()
-                                    if not _r.data:
-                                        # Already sent by someone/something else — skip without re-logging
+                                    # IDEMPOTENT via mark_task_sent (records sent_at, sender_used, event ledger)
+                                    _changed = mark_task_sent(lnk["lead_id"], lnk["sequence_name"], lnk["step"], sender_email=lnk["sender"], source="gmail-manual")
+                                    if not _changed:
                                         st.session_state["_last_check_msg"] = f"⚠️ {lnk['business']} was already sent — skipped duplicate"
                                         st.session_state["seq_bulk_sent"].add(i)
                                         st.rerun()
@@ -3690,6 +3791,14 @@ if _active_page == "sequences":
         if e_import != "All imports":
             pool = pool[pool["source"] == e_import]
         pool = pool[pool["email"].str.contains("@", na=False)]
+
+        # Exclude leads flagged do_not_email in DB (new canonical DNC)
+        if "do_not_email" in pool.columns:
+            _before_db_dnc = len(pool)
+            pool = pool[(pool["do_not_email"] != True) & (pool["do_not_email"] != "True") & (pool["do_not_email"] != "true")]
+            _db_dnc_excluded = _before_db_dnc - len(pool)
+        else:
+            _db_dnc_excluded = 0
 
         # ─── EXCLUSION TOGGLES (user controls what to filter) ───
         st.markdown("**Exclude leads who:**")
