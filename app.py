@@ -369,6 +369,18 @@ SENDERS = [
     {"email": "ashley@yetipay.me", "name": "Ashley", "daily_cap": 100, "chrome_profile": "Profile 5"},  # no own profile yet
 ]
 SENDER_PROFILE = {s["email"]: s["chrome_profile"] for s in SENDERS}
+
+# Apply stored daily caps from Supabase app_config (overrides defaults above)
+try:
+    _r_caps = sb.table("app_config").select("value").eq("key", "sender_caps").execute()
+    if _r_caps.data and _r_caps.data[0].get("value"):
+        _v_caps = _r_caps.data[0]["value"]
+        _stored_caps_init = json.loads(_v_caps) if isinstance(_v_caps, str) else dict(_v_caps)
+        for _s in SENDERS:
+            if _s["email"] in _stored_caps_init:
+                _s["daily_cap"] = int(_stored_caps_init[_s["email"]])
+except Exception:
+    pass
 SEND_TRACKER = ROOT / "send_tracker.json"
 
 
@@ -3691,7 +3703,7 @@ if _active_page == "sequences":
                         if i in sent_set:
                             continue
                         else:
-                            lc1, lc2, lc3 = st.columns([5, 2, 1])
+                            lc1, lc2, lc3, lc4 = st.columns([5, 1, 1, 1])
                             # Streamlit button — clicking marks as sent + opens Gmail tab via JS popup
                             with lc1:
                                 if st.button(f"✉ {lnk['business']} — {lnk['email']}", key=f"seq_open_{i}", use_container_width=True):
@@ -3713,8 +3725,23 @@ if _active_page == "sequences":
                                     st.session_state["seq_bulk_sent"].add(i)
                                     st.session_state["_seq_auto_open"] = lnk["link"]
                                     st.rerun()
-                            if lc2.button("🚫", key=f"seq_skip_{i}", help="Skip this task"):
+                            if lc2.button("💤", key=f"seq_snooze_{i}", help="Snooze 3 days"):
+                                _new_due = (date.today() + pd.Timedelta(days=3)).isoformat()
+                                sb.table("sequence_queue").update({"due_date": _new_due}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                st.toast(f"Snoozed {lnk['business']} for 3 days")
+                                st.rerun()
+                            if lc3.button("🚫", key=f"seq_skip_{i}", help="Skip this task"):
                                 sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("sequence_name", lnk["sequence_name"]).eq("step", lnk["step"]).execute()
+                                st.rerun()
+                            if lc4.button("🚫🚫", key=f"seq_dnc_{i}", help="DNC this lead — cancels all pending steps + flags do_not_email"):
+                                try:
+                                    sb.table("leads").update({"do_not_email": True}).eq("id", int(lnk["lead_id"])).execute()
+                                except Exception:
+                                    pass
+                                sb.table("sequence_queue").update({"status": "skipped"}).eq("lead_id", int(lnk["lead_id"])).eq("status", "pending").execute()
+                                load_crm.clear()
+                                st.session_state.pop("_df_cache", None)
+                                st.toast(f"DNC'd {lnk['business']}")
                                 st.rerun()
 
                     st.divider()
@@ -4788,6 +4815,38 @@ if _active_page == "settings":
         cfg["target"] = int(new_target)
         save_config(cfg)
         st.success("Saved")
+
+    st.divider()
+    st.subheader("📧 Sender daily caps")
+    st.caption("Maximum emails per sender per day. Reduce for cold outreach to avoid spam flags. Stored in Supabase so survives redeploys.")
+    # Load current caps from Supabase, fall back to SENDERS defaults
+    _stored_caps = {}
+    try:
+        _r = sb.table("app_config").select("value").eq("key", "sender_caps").execute()
+        if _r.data and _r.data[0].get("value"):
+            _v = _r.data[0]["value"]
+            _stored_caps = json.loads(_v) if isinstance(_v, str) else dict(_v)
+    except Exception:
+        pass
+    _new_caps = {}
+    _caps_changed = False
+    for s in SENDERS:
+        cur_cap = _stored_caps.get(s["email"], s["daily_cap"])
+        new_cap = st.number_input(s["email"], min_value=0, max_value=500, value=int(cur_cap), key=f"cap_{s['email']}")
+        _new_caps[s["email"]] = int(new_cap)
+        if new_cap != cur_cap:
+            _caps_changed = True
+    if _caps_changed and st.button("💾 Save sender caps", type="primary", key="save_sender_caps"):
+        try:
+            sb.table("app_config").upsert({"key": "sender_caps", "value": json.dumps(_new_caps)}).execute()
+            # Update in-memory SENDERS too
+            for s in SENDERS:
+                if s["email"] in _new_caps:
+                    s["daily_cap"] = _new_caps[s["email"]]
+            st.success("Saved sender caps")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Save failed: {e}")
 
     st.divider()
     st.subheader("Pipelines & Stages")
