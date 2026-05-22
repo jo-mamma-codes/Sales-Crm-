@@ -4561,12 +4561,24 @@ if _active_page == "sequences":
                 pr2.caption("Pausing parks pending tasks as 'paused'. Resume puts them back to pending.")
 
             st.divider()
-            if st.button("🗑️ Delete sequence", type="secondary", key="seq_m_del"):
+            # ─── Cancel all enrollments ───
+            _pending_for_cancel = len(seq_q[(seq_q["sequence_name"] == seq_pick) & (seq_q["status"] == "pending")]) if not seq_q.empty else 0
+            _all_for_cancel = seq_q["lead_id"].astype(int).nunique() if not seq_q.empty else 0
+            ca1, ca2 = st.columns([3, 4])
+            if ca1.button(f"❌ Cancel ALL enrollments ({_pending_for_cancel} pending)", key="seq_m_cancel_all", help="Marks every pending task in this sequence as cancelled. Past sends stay on record. Sequence definition is kept (use Delete to remove)."):
+                sb.table("sequence_queue").update({"status": "cancelled"}).eq("sequence_name", seq_pick).eq("status", "pending").execute()
+                log_audit("seq_cancel_all", target_type="sequence", target_id=seq_pick, metadata={"cancelled_count": _pending_for_cancel})
+                st.success(f"Cancelled {_pending_for_cancel} pending enrollments in '{seq_pick}'. Sequence still exists.")
+                st.rerun()
+            ca2.caption("Cancels pending only. Keeps the sequence definition + past sends on record.")
+
+            st.divider()
+            if st.button("🗑️ Delete sequence entirely", type="secondary", key="seq_m_del", help="Removes sequence definition AND all queue rows. Past sends remain in activity_log."):
                 del sequences[seq_pick]
                 save_sequences(sequences)
-                seq_q = seq_q[seq_q["sequence_name"] != seq_pick]
-                save_seq_queue(seq_q)
-                st.success("Deleted")
+                sb.table("sequence_queue").delete().eq("sequence_name", seq_pick).execute()
+                log_audit("seq_delete", target_type="sequence", target_id=seq_pick)
+                st.success("Sequence + all its queue rows deleted")
                 st.rerun()
 
 
