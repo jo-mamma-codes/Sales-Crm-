@@ -1940,6 +1940,22 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
                         direction = "Sent" if "yetipay" in sender.lower() else "Received"
                         timeline_items.append({"timestamp": m.get("date", ""), "type": "gmail", "title": f"{direction}: {m.get('subject', '')}", "body": m.get("snippet", ""), "source": "gmail"})
 
+            # Email events ledger (Resend webhooks: delivered, bounced, opened, clicked, complained)
+            try:
+                _ev = sb.table("email_events").select("*").eq("lead_id", int(lead_id)).order("occurred_at", desc=True).limit(50).execute()
+                for e in _ev.data or []:
+                    etype = e.get("event_type", "")
+                    icon = {"sent": "✉", "delivered": "✅", "opened": "👁", "clicked": "🔗", "bounced": "⚠️", "complained": "🚫", "unsubscribed": "🛑", "replied": "💬"}.get(etype, "•")
+                    timeline_items.append({
+                        "timestamp": e.get("occurred_at", ""),
+                        "type": "event",
+                        "title": f"{icon} Email {etype}",
+                        "body": f"Sequence: {e.get('sequence_name', '')} · Step {(e.get('step') or 0) + 1} · via {e.get('source', '')}" + (f" · {e.get('message_id', '')[:20]}" if e.get('message_id') else ""),
+                        "source": "events",
+                    })
+            except Exception:
+                pass  # email_events table may not exist yet
+
             timeline_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
             if not timeline_items:
@@ -4025,6 +4041,55 @@ if _active_page == "sequences":
                 if ba3.button("📥 Export to CSV", key="bulk_export_enrolled"):
                     csv_data = display_df.to_csv(index=False).encode("utf-8")
                     st.download_button("⬇️ Download CSV", csv_data, "enrollments.csv", "text/csv", key="dl_enrolled_csv")
+
+                # ─── Bulk move A → B ───
+                st.divider()
+                st.markdown("**Move enrolled leads to another sequence**")
+                mv1, mv2 = st.columns([3, 1])
+                _other_seqs = [s for s in sequences.keys() if s != seq_filter] if seq_filter != "All" else list(sequences.keys())
+                _target = mv1.selectbox("Target sequence", _other_seqs, key="bulk_move_target",
+                                         help="Cancels current pending steps for visible leads, then enrolls them into the target sequence (fresh day 0)")
+                _move_only_pending = st.checkbox("Only move leads with pending steps (skip leads already sent)", value=True, key="bulk_move_pending_only")
+                if mv2.button(f"➡️ Move {len(view)} → '{_target}'", key="bulk_move_btn", type="primary"):
+                    _move_view = view[view["status"] == "pending"] if _move_only_pending else view
+                    _move_ids = _move_view["lead_id"].astype(int).unique().tolist()
+                    if not _move_ids:
+                        st.warning("No leads to move (filter returned 0)")
+                    else:
+                        # Cancel pending in source sequence (only if scoped)
+                        if seq_filter != "All":
+                            sb.table("sequence_queue").update({"status": "cancelled"}).in_("lead_id", _move_ids).eq("sequence_name", seq_filter).eq("status", "pending").execute()
+                        # Build new queue rows for target sequence
+                        target_seq = sequences.get(_target, {})
+                        target_steps = target_seq.get("steps", [])
+                        if not target_steps:
+                            st.error(f"Target sequence '{_target}' has no steps")
+                        else:
+                            # Need business_name per lead — pull from df
+                            _biz_map = dict(zip(df["id"].astype(str), df["business_name"]))
+                            queue_rows = []
+                            for lid in _move_ids:
+                                biz = _biz_map.get(str(lid), "")
+                                # Skip if already enrolled in target with pending/done
+                                existing = sb.table("sequence_queue").select("id").eq("lead_id", lid).eq("sequence_name", _target).execute()
+                                if existing.data:
+                                    continue
+                                for i, step in enumerate(target_steps):
+                                    due = (date.today() + pd.Timedelta(days=step["day"])).isoformat()
+                                    queue_rows.append({
+                                        "lead_id": lid,
+                                        "business_name": biz,
+                                        "sequence_name": _target,
+                                        "step": i,
+                                        "due_date": due,
+                                        "status": "pending",
+                                    })
+                            if queue_rows:
+                                batch_size = 500
+                                for i in range(0, len(queue_rows), batch_size):
+                                    sb.table("sequence_queue").insert(queue_rows[i:i+batch_size]).execute()
+                            st.success(f"✅ Moved {len(_move_ids)} leads to '{_target}' ({len(queue_rows)} new tasks queued)")
+                            st.rerun()
             else:
                 st.info("No enrollments match filters.")
 
@@ -4171,6 +4236,14 @@ if _active_page == "reports":
 
         # ── Sequence Performance ──
         _seq_q_rep = load_seq_queue()
+        # Load all email_events once for cross-ref
+        _events_df = pd.DataFrame()
+        try:
+            _ev_r = sb.table("email_events").select("*").execute()
+            _events_df = pd.DataFrame(_ev_r.data) if _ev_r.data else pd.DataFrame()
+        except Exception:
+            pass
+
         if not _seq_q_rep.empty:
             st.markdown("### Sequence Performance")
             _seq_stats = []
@@ -4182,18 +4255,40 @@ if _active_page == "reports":
                 _skipped = len(_sg[_sg["status"] == "skipped"])
                 _failed = len(_sg[_sg["status"] == "failed"])
                 _completed_leads = _sg.groupby("lead_id").apply(lambda g: all(s in ("done", "skipped") for s in g["status"])).sum()
+
+                # Event-based metrics (from email_events ledger)
+                _delivered = _bounced = _opened = _clicked = _replied = 0
+                if not _events_df.empty and "sequence_name" in _events_df.columns:
+                    _seq_ev = _events_df[_events_df["sequence_name"] == sn]
+                    _delivered = len(_seq_ev[_seq_ev["event_type"] == "delivered"])
+                    _bounced = len(_seq_ev[_seq_ev["event_type"] == "bounced"])
+                    _opened = _seq_ev[_seq_ev["event_type"] == "opened"]["lead_id"].nunique() if not _seq_ev.empty else 0
+                    _clicked = _seq_ev[_seq_ev["event_type"] == "clicked"]["lead_id"].nunique() if not _seq_ev.empty else 0
+                    _replied = len(_seq_ev[_seq_ev["event_type"] == "replied"])
+
+                _open_rate = f"{(_opened / _sent * 100):.0f}%" if _sent else "—"
+                _bounce_rate = f"{(_bounced / _sent * 100):.1f}%" if _sent else "—"
+                _click_rate = f"{(_clicked / _sent * 100):.0f}%" if _sent else "—"
+
                 _seq_stats.append({
                     "Sequence": sn,
                     "Enrolled": _enrolled,
                     "Sent": _sent,
                     "Pending": _pending,
+                    "Delivered": _delivered,
+                    "Opened": _opened,
+                    "Open %": _open_rate,
+                    "Clicked": _clicked,
+                    "Click %": _click_rate,
+                    "Replied": _replied,
+                    "Bounced": _bounced,
+                    "Bounce %": _bounce_rate,
                     "Skipped": _skipped,
                     "Failed": _failed,
-                    "Completed": int(_completed_leads),
                     "Completion %": f"{(_completed_leads / _enrolled * 100):.0f}%" if _enrolled else "0%",
                 })
             st.dataframe(pd.DataFrame(_seq_stats), use_container_width=True, hide_index=True)
-            st.caption("Enrolled = unique leads in sequence · Sent = emails dispatched · Pending = upcoming steps · Completed = all steps done or skipped")
+            st.caption("Delivered/Opened/Clicked/Replied populate from email_events ledger (Resend webhooks). Manual sends only show Sent count until webhooks wired.")
             st.divider()
 
         # ── Conversion Funnel ──
