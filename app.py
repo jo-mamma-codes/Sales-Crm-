@@ -556,6 +556,20 @@ def save_seq_queue(q):
             sb.table("sequence_queue").insert(rows[i:i+batch_size]).execute()
 
 
+def log_audit(action, target_type=None, target_id=None, metadata=None, actor=None):
+    """Write to audit_log table. Silently no-ops if table doesn't exist yet."""
+    try:
+        sb.table("audit_log").insert({
+            "actor": actor or (st.session_state.get("user_name") if "st" in dir() else None) or "system",
+            "action": action,
+            "target_type": target_type,
+            "target_id": str(target_id) if target_id is not None else None,
+            "metadata": metadata or {},
+        }).execute()
+    except Exception:
+        pass
+
+
 def mark_task_sent(lead_id, sequence_name, step, sender_email=None, message_id=None, source="manual"):
     """Atomically mark a sequence_queue row as sent + log to email_events.
 
@@ -2533,6 +2547,37 @@ if _active_page == "contacts":
             cview = cview[_cview_dates >= _today_c - pd.Timedelta(days=7)]
         elif c_uploaded == "Last 30 days":
             cview = cview[_cview_dates >= _today_c - pd.Timedelta(days=30)]
+
+    # Bulk actions on filtered set
+    with st.expander(f"⚙️ Bulk actions on these {len(cview)} contacts", expanded=False):
+        bx1, bx2, bx3, bx4 = st.columns(4)
+        if bx1.button(f"🚫 Mark all DNC ({len(cview)})", key="c_bulk_dnc"):
+            _ids_dnc = cview["id"].astype(int).tolist()
+            if _ids_dnc:
+                from datetime import datetime as _dt
+                # Update in batches
+                for i in range(0, len(_ids_dnc), 200):
+                    batch = _ids_dnc[i:i+200]
+                    sb.table("leads").update({
+                        "do_not_email": True,
+                        "unsubscribed_at": _dt.now().isoformat(),
+                    }).in_("id", batch).execute()
+                # Cancel pending sequence tasks for all of them
+                sb.table("sequence_queue").update({"status": "cancelled"}).in_("lead_id", _ids_dnc).eq("status", "pending").execute()
+                load_crm.clear()
+                st.session_state.pop("_df_cache", None)
+                st.success(f"DNC'd {len(_ids_dnc)} leads + cancelled their pending sequence tasks")
+                st.rerun()
+        if bx2.button(f"⏸️ Cancel all sequences ({len(cview)})", key="c_bulk_cancel_seq"):
+            _ids_c = cview["id"].astype(int).tolist()
+            if _ids_c:
+                sb.table("sequence_queue").update({"status": "cancelled"}).in_("lead_id", _ids_c).eq("status", "pending").execute()
+                st.success(f"Cancelled pending sequence tasks for {len(_ids_c)} leads")
+                st.rerun()
+        if bx3.button(f"📥 Export CSV ({len(cview)})", key="c_bulk_export"):
+            _csv = cview.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download", _csv, "contacts.csv", "text/csv", key="dl_contacts_csv")
+        bx4.caption("Bulk actions apply to ALL filtered contacts, not just the page shown.")
 
     # Pagination header
     page_size = 25
@@ -4549,6 +4594,47 @@ if _active_page == "reports":
                 })
             st.dataframe(pd.DataFrame(_seq_stats), use_container_width=True, hide_index=True)
             st.caption("Delivered/Opened/Clicked/Replied populate from email_events ledger (Resend webhooks). Manual sends only show Sent count until webhooks wired.")
+
+            # Per-template performance
+            st.markdown("### Per-template Performance")
+            _tmpl_stats = {}
+            _tmpls = load_templates()
+            for sn, sdef in (sequences if "sequences" in dir() else load_sequences()).items():
+                for si, step in enumerate(sdef.get("steps", [])):
+                    tn = step.get("template")
+                    if not tn:
+                        continue
+                    # Count sends + events for (sn, si)
+                    _seq_step = _seq_q_rep[(_seq_q_rep["sequence_name"] == sn) & (_seq_q_rep["step"] == si)] if not _seq_q_rep.empty else pd.DataFrame()
+                    _sent_n = len(_seq_step[_seq_step["status"] == "done"]) if not _seq_step.empty else 0
+                    _opened_n = _bounced_n = _replied_n = 0
+                    if not _events_df.empty and "sequence_name" in _events_df.columns and "step" in _events_df.columns:
+                        _evs = _events_df[(_events_df["sequence_name"] == sn) & (_events_df["step"] == si)]
+                        _opened_n = _evs[_evs["event_type"] == "opened"]["lead_id"].nunique() if not _evs.empty else 0
+                        _bounced_n = len(_evs[_evs["event_type"] == "bounced"])
+                        _replied_n = len(_evs[_evs["event_type"] == "replied"])
+                    _key = f"{tn}"
+                    if _key not in _tmpl_stats:
+                        _tmpl_stats[_key] = {"Template": tn, "Sent": 0, "Opened": 0, "Replied": 0, "Bounced": 0, "Used in": set()}
+                    _tmpl_stats[_key]["Sent"] += _sent_n
+                    _tmpl_stats[_key]["Opened"] += _opened_n
+                    _tmpl_stats[_key]["Replied"] += _replied_n
+                    _tmpl_stats[_key]["Bounced"] += _bounced_n
+                    _tmpl_stats[_key]["Used in"].add(f"{sn} step {si+1}")
+            if _tmpl_stats:
+                _rows = []
+                for k, v in _tmpl_stats.items():
+                    _rows.append({
+                        "Template": v["Template"],
+                        "Sent": v["Sent"],
+                        "Opened": v["Opened"],
+                        "Open %": f"{(v['Opened']/v['Sent']*100):.0f}%" if v["Sent"] else "—",
+                        "Replied": v["Replied"],
+                        "Reply %": f"{(v['Replied']/v['Sent']*100):.0f}%" if v["Sent"] else "—",
+                        "Bounced": v["Bounced"],
+                        "Used in": ", ".join(sorted(v["Used in"]))[:60],
+                    })
+                st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
             st.divider()
 
         # ── Conversion Funnel ──
