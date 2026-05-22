@@ -4386,12 +4386,23 @@ if _active_page == "sequences":
                     # If template selected, show inline editor
                     if tm != "(none)" and tm in templates:
                         with st.expander(f"📝 Edit template '{tm}'", expanded=False):
+                            st.caption("Available tokens (paste into subject or body): " + " · ".join(f"`{k}`" for k in TOKENS.keys()))
                             t_subj = st.text_input("Subject", value=templates[tm].get("subject", ""), key=f"seq_m_edit_tsubj_{si}")
                             t_body = st.text_area("Body", value=templates[tm].get("body", ""), height=300, key=f"seq_m_edit_tbody_{si}")
+
+                            # Live preview with first lead in df
+                            with st.expander("🔍 Preview with first lead", expanded=False):
+                                _preview_l = df.iloc[0].to_dict() if not df.empty else {}
+                                _pv_s, _pv_b = render_template({"subject": t_subj, "body": t_body}, _preview_l)
+                                st.markdown(f"**Preview for:** {_preview_l.get('contact_name', '?')} ({_preview_l.get('email', '?')})")
+                                st.markdown(f"**Subject:** `{_pv_s}`")
+                                st.code(_pv_b, language=None)
+
                             if st.button(f"💾 Save template '{tm}'", key=f"seq_m_edit_tsave_{si}"):
                                 templates[tm] = {"subject": t_subj, "body": t_body}
                                 save_templates(templates)
                                 load_templates.clear()
+                                log_audit("template_edit", target_type="template", target_id=tm)
                                 st.success(f"Template '{tm}' saved")
                                 st.rerun()
 
