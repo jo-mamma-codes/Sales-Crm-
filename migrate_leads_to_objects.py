@@ -167,10 +167,10 @@ def main():
             except Exception as e:
                 print(f"  assoc failed: {e}")
 
-        # ─── Link activity_log entries to new contact ───
+        # ─── Link activity entries to new contact ───
         if contact_id and not DRY:
             try:
-                sb.table("activity_log").update({
+                sb.table("activity").update({
                     "object_type": "contact", "object_id": contact_id,
                 }).eq("lead_id", str(lead["id"])).is_("object_type", "null").execute()
                 activities_linked += 1

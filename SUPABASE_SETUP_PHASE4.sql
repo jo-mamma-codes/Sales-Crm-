@@ -151,13 +151,13 @@ ALTER TABLE property_definitions DISABLE ROW LEVEL SECURITY;
 
 
 -- ─── Activities (unified timeline) ──────────────────────────────────────
--- We keep activity_log table you already have, but extend it to point
+-- We keep activity table you already have, but extend it to point
 -- at any object via object_type + object_id (currently only lead_id).
-ALTER TABLE activity_log
+ALTER TABLE activity
     ADD COLUMN IF NOT EXISTS object_type TEXT,
     ADD COLUMN IF NOT EXISTS object_id BIGINT;
 
-CREATE INDEX IF NOT EXISTS activity_object_idx ON activity_log(object_type, object_id);
+CREATE INDEX IF NOT EXISTS activity_object_idx ON activity(object_type, object_id);
 
 
 -- ─── Seed default property definitions ─────────────────────────────────

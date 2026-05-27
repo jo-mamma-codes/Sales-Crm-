@@ -1621,8 +1621,9 @@ except NameError:
 # Using keyboard hint CSS only — the global search bar at top serves as command palette
 
 # ─── Sidebar Navigation (must be before header that uses nav_choice) ─────────
-NAV_ITEMS = ["📊 Pipeline", "👥 Contacts", "📅 Today", "✉️ Outreach", "🔄 Follow Up",
-             "✅ Tasks", "🔗 Sequences", "📈 Reports", "➕ Add Lead", "📥 Import", "📝 Templates", "⚙️ Settings"]
+NAV_ITEMS = ["📊 Pipeline", "🏢 Companies", "👥 Contacts", "🤝 Deals", "📅 Today", "✉️ Outreach",
+             "🔄 Follow Up", "✅ Tasks", "🔗 Sequences", "📈 Reports", "➕ Add Lead", "📥 Import",
+             "📝 Templates", "⚙️ Settings"]
 
 # Restore nav from URL query param on refresh
 _qp = st.query_params
@@ -2346,12 +2347,37 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
 # ─── Page routing via sidebar nav ─────────────────────────────────────────
 # Map nav labels to page keys
 _NAV_MAP = {
-    "📊 Pipeline": "pipeline", "👥 Contacts": "contacts", "📅 Today": "today",
+    "📊 Pipeline": "pipeline", "🏢 Companies": "companies", "👥 Contacts": "contacts",
+    "🤝 Deals": "deals", "📅 Today": "today",
     "✉️ Outreach": "outreach", "🔄 Follow Up": "followup", "✅ Tasks": "tasks",
     "📈 Reports": "reports", "🔗 Sequences": "sequences", "➕ Add Lead": "add",
     "📥 Import": "import", "📝 Templates": "templates", "⚙️ Settings": "settings",
 }
 _active_page = _NAV_MAP.get(nav_choice, "pipeline")
+
+# ─── New object-based pages (Companies, Deals, Contacts v2) ────────────
+import object_pages
+
+# If user opened a specific company / deal / contact via association, render its profile first
+if st.session_state.get("view_object_type") and st.session_state.get("view_object_id"):
+    _ot = st.session_state["view_object_type"]
+    _oid = st.session_state["view_object_id"]
+    if _ot == "company":
+        object_pages.render_company_profile(sb, _oid)
+        st.stop()
+    elif _ot == "deal":
+        object_pages.render_deal_profile(sb, _oid)
+        st.stop()
+    elif _ot == "contact":
+        object_pages.render_contact_profile_v2(sb, _oid)
+        st.stop()
+
+if _active_page == "companies":
+    object_pages.render_companies_index(sb)
+    st.stop()
+if _active_page == "deals":
+    object_pages.render_deals_index(sb)
+    st.stop()
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────
 STAGE_CLASSES = {
