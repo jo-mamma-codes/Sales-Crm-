@@ -213,9 +213,44 @@ def global_search(sb, q, limit=10):
 
 def render_companies_index(sb):
     """Companies list view — sortable table with quick stats."""
-    st.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Companies</div>'
+    h1, h2 = st.columns([4, 1])
+    h1.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Companies</div>'
                 '<div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">All accounts. Click a row to open the company profile.</div>',
                 unsafe_allow_html=True)
+    if h2.button("➕ New company", key="co_new", type="primary", use_container_width=True):
+        st.session_state["co_show_new_form"] = True
+
+    if st.session_state.get("co_show_new_form"):
+        with st.expander("Create new company", expanded=True):
+            nc1, nc2 = st.columns(2)
+            new_name = nc1.text_input("Company name *", key="co_new_name")
+            new_region = nc2.text_input("Region / city", key="co_new_region")
+            new_industry = nc1.text_input("Industry", key="co_new_industry")
+            new_website = nc2.text_input("Website", key="co_new_website")
+            new_locs = nc1.number_input("Number of locations", min_value=0, value=1, key="co_new_locs")
+            new_terms = nc2.number_input("Number of terminals", min_value=0, value=0, key="co_new_terms")
+            if st.button("Create", key="co_new_save", type="primary"):
+                if not new_name.strip():
+                    st.error("Name required")
+                else:
+                    try:
+                        sb.table("companies").insert({
+                            "name": new_name.strip(),
+                            "region": new_region or None,
+                            "industry": new_industry or None,
+                            "website": new_website or None,
+                            "num_locations": int(new_locs) or None,
+                            "num_terminals": int(new_terms) or None,
+                            "lifecycle_stage": "lead",
+                        }).execute()
+                        st.session_state["co_show_new_form"] = False
+                        st.success(f"Created {new_name}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Create failed: {e}")
+            if st.button("Cancel", key="co_new_cancel"):
+                st.session_state["co_show_new_form"] = False
+                st.rerun()
 
     # Filters
     f1, f2, f3, f4 = st.columns([3, 2, 2, 2])
@@ -365,9 +400,53 @@ def render_company_profile(sb, company_id):
 
 def render_deals_index(sb):
     """Deals list view."""
-    st.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Deals</div>'
+    h1, h2 = st.columns([4, 1])
+    h1.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Deals</div>'
                 '<div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">All opportunities in flight.</div>',
                 unsafe_allow_html=True)
+    if h2.button("➕ New deal", key="deal_new", type="primary", use_container_width=True):
+        st.session_state["deal_show_new_form"] = True
+
+    if st.session_state.get("deal_show_new_form"):
+        with st.expander("Create new deal", expanded=True):
+            dn1, dn2 = st.columns(2)
+            nd_name = dn1.text_input("Deal name *", key="deal_new_name")
+            nd_pipe = dn2.selectbox("Pipeline", ["Sales", "POS Customers", "Referral"], key="deal_new_pipe")
+            nd_stage = dn1.text_input("Stage", value="New", key="deal_new_stage")
+            nd_amount = dn2.number_input("Amount (£)", min_value=0.0, value=0.0, step=500.0, key="deal_new_amount")
+            # Optional company link
+            cos = sb.table("companies").select("id, name").limit(2000).execute()
+            co_options = ["(none)"] + [f"{c['name']} (#{c['id']})" for c in cos.data or []]
+            nd_co = st.selectbox("Link to company", co_options, key="deal_new_co")
+            if st.button("Create deal", key="deal_new_save", type="primary"):
+                if not nd_name.strip():
+                    st.error("Name required")
+                else:
+                    try:
+                        deal_payload = {
+                            "name": nd_name.strip(),
+                            "pipeline": nd_pipe,
+                            "stage": nd_stage,
+                            "amount": float(nd_amount) or None,
+                        }
+                        ins = sb.table("deals").insert(deal_payload).execute()
+                        new_did = ins.data[0]["id"]
+                        # Link to company if picked
+                        if nd_co != "(none)":
+                            co_id = int(nd_co.rsplit("#", 1)[1].rstrip(")"))
+                            sb.table("associations").upsert({
+                                "from_object_type": "deal", "from_object_id": new_did,
+                                "to_object_type": "company", "to_object_id": co_id,
+                                "association_label": "primary_company",
+                            }, on_conflict="from_object_type,from_object_id,to_object_type,to_object_id,association_label").execute()
+                        st.session_state["deal_show_new_form"] = False
+                        st.success(f"Created {nd_name}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Create failed: {e}")
+            if st.button("Cancel", key="deal_new_cancel"):
+                st.session_state["deal_show_new_form"] = False
+                st.rerun()
     try:
         res = sb.table("deals").select("*").order("created_at", desc=True).limit(100).execute()
         rows = res.data or []
