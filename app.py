@@ -435,6 +435,16 @@ def gmail_link(to, subject, body, sender_email=None):
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
+def is_business_hours():
+    """True if current local time is Mon-Fri 8am-7pm. Override via st.session_state['ignore_send_hours']=True."""
+    if st.session_state.get("ignore_send_hours"):
+        return True
+    now = datetime.now()
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    return 8 <= now.hour < 19
+
+
 def validate_email_send(to_email, subject, body):
     """Pre-send sanity checks. Returns (ok: bool, error_msg: str).
 
@@ -2448,6 +2458,26 @@ if _active_page == "pipeline":
     except Exception:
         pass
 
+    # Pre-compute open counts + replied/clicked per lead (from email_events)
+    _open_counts = {}
+    _replied_ids = set()
+    _clicked_ids = set()
+    try:
+        _ev_kan = sb.table("email_events").select("lead_id, event_type").execute()
+        for e in _ev_kan.data or []:
+            lid = str(e.get("lead_id")) if e.get("lead_id") is not None else None
+            if not lid:
+                continue
+            et = e.get("event_type")
+            if et == "opened":
+                _open_counts[lid] = _open_counts.get(lid, 0) + 1
+            elif et == "replied":
+                _replied_ids.add(lid)
+            elif et == "clicked":
+                _clicked_ids.add(lid)
+    except Exception:
+        pass
+
     # Track expanded columns
     if "kanban_expanded" not in st.session_state:
         st.session_state["kanban_expanded"] = {}
@@ -2486,6 +2516,11 @@ if _active_page == "pipeline":
                 cat_html = f'<span style="background:#f1f0ff;color:#7c3aed;font-size:9px;padding:1px 6px;border-radius:8px;">{cat}</span>' if cat and cat != "Other" else ""
                 score_html = f'<span style="color:{_sc_color};font-size:9px;font-weight:600;">{_sc_label}</span>'
                 seq_html = '<span style="background:#dbeafe;color:#1d4ed8;font-size:9px;padding:1px 6px;border-radius:8px;">🔗 in seq</span>' if str(row["id"]) in _in_seq_ids else ""
+                _row_lid = str(row["id"])
+                _open_n = _open_counts.get(_row_lid, 0)
+                opens_html = f'<span style="background:#fef3c7;color:#b45309;font-size:9px;padding:1px 6px;border-radius:8px;font-weight:600;">🔥 {_open_n} opens</span>' if _open_n else ""
+                replied_html = '<span style="background:#d1fae5;color:#065f46;font-size:9px;padding:1px 6px;border-radius:8px;font-weight:600;">💬 replied</span>' if _row_lid in _replied_ids else ""
+                clicked_html = '<span style="background:#ede9fe;color:#5b21b6;font-size:9px;padding:1px 6px;border-radius:8px;font-weight:600;">🔗 clicked</span>' if _row_lid in _clicked_ids else ""
 
                 with st.container(border=True):
                     st.markdown(
@@ -2497,7 +2532,7 @@ if _active_page == "pipeline":
                     st.button(row["business_name"][:36], key=f"k_{stage}_{row['id']}", on_click=open_profile, args=(row["id"],), use_container_width=True)
                     st.markdown(
                         f'<div style="font-size:10px;color:#64748b;margin:-8px 0 2px;">{esc(row["contact_name"])} {score_html} {stale} {deal_html}</div>'
-                        f'<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">{cat_html} {seq_html}'
+                        f'<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">{cat_html} {seq_html} {opens_html} {replied_html} {clicked_html}'
                         f'<span style="font-size:9px;color:#b0b0c0;">{esc(touch)}</span></div>',
                         unsafe_allow_html=True,
                     )
@@ -3581,6 +3616,14 @@ if _active_page == "sequences":
 
     if seq_sub == "Today's tasks":
         st.subheader("Sequence tasks due today")
+        # Send-time guard — discourage out-of-hours bulk sends
+        if not is_business_hours():
+            _now_dow = datetime.now().strftime("%A")
+            _now_hr = datetime.now().strftime("%H:%M")
+            sh1, sh2 = st.columns([4, 1])
+            sh1.warning(f"⏰ Outside business hours ({_now_dow} {_now_hr}). Bulk sends discouraged for deliverability. Tick the box to override.")
+            if sh2.checkbox("Send anyway", key="ignore_send_hours"):
+                pass
         # Auto-open Gmail tab if user just clicked a row
         if st.session_state.get("_seq_auto_open"):
             _open_url = st.session_state.pop("_seq_auto_open")
