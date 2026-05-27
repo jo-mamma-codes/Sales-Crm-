@@ -359,13 +359,18 @@ def render_companies_index(sb):
     # Render rows
     for c in rows:
         with st.container():
-            cc1, cc2, cc3, cc4, cc5 = st.columns([3, 2, 2, 1.5, 1.5])
+            cc1, cc2, cc3, cc4 = st.columns([4, 2, 2, 2])
             if cc1.button(f"🏢 {c['name']}", key=f"co_open_{c['id']}", use_container_width=True):
                 navigate_to("company", c["id"])
-            cc2.markdown(f'<div style="padding-top:8px;font-size:13px;color:#64748b;">{_esc(c.get("region") or "")}</div>', unsafe_allow_html=True)
-            cc3.markdown(f'<div style="padding-top:8px;font-size:13px;color:#64748b;">{_esc(c.get("industry") or "")}</div>', unsafe_allow_html=True)
-            cc4.markdown(f'<div style="padding-top:8px;font-size:13px;color:#1a1a2e;font-weight:600;">{c.get("num_locations") or "—"} loc</div>', unsafe_allow_html=True)
-            cc5.markdown(f'<div style="padding-top:8px;font-size:13px;color:#1a1a2e;font-weight:600;">{c.get("num_terminals") or "—"} term</div>', unsafe_allow_html=True)
+            _region = (c.get("region") or "").replace("-", " ").title()
+            _industry_raw = c.get("industry") or ""
+            _industry = _industry_raw.replace("_", " ").title() if _industry_raw else ""
+            cc2.markdown(f'<div style="padding-top:8px;font-size:13px;color:#64748b;">{_esc(_region)}</div>', unsafe_allow_html=True)
+            cc3.markdown(f'<div style="padding-top:8px;font-size:13px;color:#64748b;">{_esc(_industry)}</div>', unsafe_allow_html=True)
+            _meta = []
+            if c.get("num_locations"): _meta.append(f"{c['num_locations']} locations")
+            if c.get("num_terminals"): _meta.append(f"{c['num_terminals']} terminals")
+            cc4.markdown(f'<div style="padding-top:8px;font-size:12px;color:#1a1a2e;font-weight:500;">{_esc(" · ".join(_meta))}</div>', unsafe_allow_html=True)
             st.markdown('<hr style="margin:4px 0;border:none;border-top:1px solid #f1f5f9;">', unsafe_allow_html=True)
 
     # Pagination
