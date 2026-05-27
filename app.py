@@ -341,6 +341,25 @@ SIGNATURES = {
 DEFAULT_SIGNATURE = SIGNATURES["joseph.allison@yetipay.me"]
 
 
+def pick_template_variant(step, templates_dict, lead_id):
+    """A/B variant picker. Step can carry 'template' (control) and 'template_b' (variant).
+
+    Deterministic per (sequence, step, lead_id) so same lead always sees same variant
+    if you re-render — prevents inconsistent message between preview and send.
+    Returns (template_name, variant_label) where variant_label is 'A' or 'B'.
+    """
+    a = step.get("template")
+    b = step.get("template_b")
+    if not b or b not in templates_dict:
+        return a, "A"
+    if not a or a not in templates_dict:
+        return b, "B"
+    # Deterministic hash so same lead always gets same variant
+    import hashlib
+    h = int(hashlib.md5(f"{lead_id}".encode()).hexdigest()[:8], 16)
+    return (a, "A") if (h % 2 == 0) else (b, "B")
+
+
 def render_template(tmpl, lead, sender_email=None):
     """Replace {{token}} placeholders with CRM record values."""
     subj, body = tmpl["subject"], tmpl["body"]
@@ -1532,6 +1551,62 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 # ─── UI ──────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Yetipay CRM", layout="wide", page_icon="💳", initial_sidebar_state="expanded")
 st.markdown(HUBSPOT_CSS, unsafe_allow_html=True)
+
+# ─── Multi-user auth ────────────────────────────────────────────────
+# Reads users from st.secrets["auth_users"] — TOML list of {name, email, password_hash}.
+# If no auth_users configured, auth is skipped (single-user dev mode).
+def _check_auth():
+    try:
+        users_cfg = st.secrets.get("auth_users", None)
+        if not users_cfg:
+            st.session_state["user_name"] = "joseph"
+            st.session_state["user_email"] = "joseph@yetipay.me"
+            return True
+    except Exception:
+        st.session_state["user_name"] = "joseph"
+        st.session_state["user_email"] = "joseph@yetipay.me"
+        return True
+
+    if st.session_state.get("_auth_ok"):
+        return True
+
+    st.markdown("## 🔐 Sign in to Yetipay CRM")
+    with st.form("login_form"):
+        em = st.text_input("Email")
+        pw = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Sign in", type="primary")
+    if submit:
+        import bcrypt
+        # users_cfg is a list of dicts: {"email": ..., "name": ..., "password_hash": ...}
+        matched = None
+        for u in users_cfg:
+            if u.get("email", "").lower() == em.lower().strip():
+                matched = u
+                break
+        if not matched:
+            st.error("Unknown email")
+            st.stop()
+        try:
+            if bcrypt.checkpw(pw.encode(), matched["password_hash"].encode()):
+                st.session_state["_auth_ok"] = True
+                st.session_state["user_name"] = matched.get("name", em)
+                st.session_state["user_email"] = em
+                log_audit("login", actor=em)
+                st.rerun()
+            else:
+                st.error("Wrong password")
+        except Exception as e:
+            st.error(f"Auth error: {e}")
+    st.stop()
+
+# Inline the auth check (log_audit is defined later, so use try/except)
+try:
+    _check_auth()
+except NameError:
+    # log_audit not defined yet — define a no-op stub and re-run
+    def log_audit(*a, **kw):
+        pass
+    _check_auth()
 # Command palette JS can't run in st.markdown (Streamlit strips <script> tags)
 # Using keyboard hint CSS only — the global search bar at top serves as command palette
 
@@ -3494,6 +3569,16 @@ if _active_page == "sequences":
 
     seq_sub = st.radio("", ["Today's tasks", "Enroll leads", "Enrolled leads", "Manage sequences"], horizontal=True, key="seq_sub")
 
+    # ─── ONBOARDING: show wizard if no sequences yet ───
+    if not sequences or all(not v.get("steps") for v in sequences.values()):
+        st.info("👋 **New to sequences?** Quick start:\n\n"
+                "1. Go to **Manage sequences** → create one (e.g. 'Cold outreach v1')\n"
+                "2. Add 3 steps: day 0 email, day 3 email, day 7 email\n"
+                "3. Go to **Templates** page → create 3 templates\n"
+                "4. Edit your sequence → assign a template to each step\n"
+                "5. Come to **Enroll leads** → pick filters → enroll\n"
+                "6. Daily: hit **Today's tasks** → 🚀 Send via Resend")
+
     if seq_sub == "Today's tasks":
         st.subheader("Sequence tasks due today")
         # Auto-open Gmail tab if user just clicked a row
@@ -3604,6 +3689,10 @@ if _active_page == "sequences":
                     lead = lead_row.iloc[0].to_dict()
 
                     if channel == "email":
+                        # A/B variant pick (if step has template_b configured)
+                        _ab_name, _ab_label = pick_template_variant(step, templates, task["lead_id"])
+                        if _ab_name:
+                            tmpl_name = _ab_name
                         if not tmpl_name:
                             _skipped_no_template += 1
                             _missing_templates_set.add(f"{task['sequence_name']} step {step_idx+1}")
@@ -4448,8 +4537,16 @@ if _active_page == "sequences":
                     tmpl_opts = ["(none)"] + list(templates.keys())
                     cur_tmpl = existing.get("template") or "(none)"
                     tmpl_idx = tmpl_opts.index(cur_tmpl) if cur_tmpl in tmpl_opts else 0
-                    tm = sc3.selectbox("Template", tmpl_opts, index=tmpl_idx, key=f"seq_m_edit_tm{si}")
-                    edited_steps.append({"day": int(d), "channel": ch, "template": tm if tm != "(none)" else None})
+                    tm = sc3.selectbox("Template A", tmpl_opts, index=tmpl_idx, key=f"seq_m_edit_tm{si}")
+                    # A/B variant picker
+                    cur_tmpl_b = existing.get("template_b") or "(none)"
+                    tmpl_b_idx = tmpl_opts.index(cur_tmpl_b) if cur_tmpl_b in tmpl_opts else 0
+                    tm_b = st.selectbox(f"Template B (A/B variant — optional, 50/50 split)", tmpl_opts, index=tmpl_b_idx, key=f"seq_m_edit_tmb{si}", help="Pick a second template to A/B test. Each lead gets one or the other (deterministic). Compare in Reports → Per-template Performance.")
+                    edited_steps.append({
+                        "day": int(d), "channel": ch,
+                        "template": tm if tm != "(none)" else None,
+                        "template_b": tm_b if tm_b != "(none)" else None,
+                    })
 
                     # If template selected, show inline editor
                     if tm != "(none)" and tm in templates:
