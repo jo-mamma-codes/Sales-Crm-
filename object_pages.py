@@ -47,11 +47,23 @@ def render_grouped_properties(sb, object_type, object_id, current_record, key_pr
                 widget_key = f"{key_prefix}_{object_type}_{object_id}_{name}"
 
                 if dtype == "number":
-                    new_val = st.number_input(label, value=int(cur_val) if cur_val not in (None, "") else 0, key=widget_key)
+                    try:
+                        _nv = int(float(cur_val)) if cur_val not in (None, "") else 0
+                    except (ValueError, TypeError):
+                        _nv = 0
+                    new_val = st.number_input(label, value=_nv, key=widget_key, step=1)
                 elif dtype == "currency":
-                    new_val = st.number_input(label, value=float(cur_val) if cur_val not in (None, "") else 0.0, step=100.0, key=widget_key)
+                    try:
+                        _nv = float(cur_val) if cur_val not in (None, "") else 0.0
+                    except (ValueError, TypeError):
+                        _nv = 0.0
+                    new_val = st.number_input(label, value=_nv, step=100.0, key=widget_key)
                 elif dtype == "percent":
-                    new_val = st.number_input(label, value=float(cur_val) if cur_val not in (None, "") else 0.0, step=0.1, min_value=0.0, max_value=100.0, key=widget_key)
+                    try:
+                        _nv = float(cur_val) if cur_val not in (None, "") else 0.0
+                    except (ValueError, TypeError):
+                        _nv = 0.0
+                    new_val = st.number_input(label, value=max(0.0, min(100.0, _nv)), step=0.1, min_value=0.0, max_value=100.0, key=widget_key)
                 elif dtype == "boolean":
                     new_val = st.checkbox(label, value=bool(cur_val), key=widget_key)
                 elif dtype == "date":
@@ -82,15 +94,19 @@ def render_grouped_properties(sb, object_type, object_id, current_record, key_pr
 
 def render_tags(sb, object_type, object_id, key_prefix=""):
     """Display + manage tags for an object."""
+    existing_tags = []
     try:
-        # Existing tags on this object
-        ot = sb.table("object_tags").select("*, tags(*)").eq("object_type", object_type).eq("object_id", int(object_id)).execute()
-        existing_tags = []
-        for row in ot.data or []:
-            t = row.get("tags") or {}
-            existing_tags.append((row["tag_id"], t.get("name"), t.get("color")))
+        # Get tag IDs for this object
+        ot = sb.table("object_tags").select("tag_id").eq("object_type", object_type).eq("object_id", int(object_id)).execute()
+        tag_ids = [r["tag_id"] for r in ot.data or [] if r.get("tag_id")]
+        if tag_ids:
+            t_rows = sb.table("tags").select("*").in_("id", tag_ids).execute()
+            tag_map = {t["id"]: t for t in t_rows.data or []}
+            for tid in tag_ids:
+                t = tag_map.get(tid, {})
+                existing_tags.append((tid, t.get("name"), t.get("color")))
     except Exception:
-        existing_tags = []
+        pass
 
     pills = ""
     for tid, tname, tcolor in existing_tags:
@@ -152,19 +168,32 @@ def render_quick_log(sb, object_type, object_id, key_prefix=""):
 
 
 def render_associations(sb, object_type, object_id, on_click_navigate):
-    """Show associated companies / contacts / deals as clickable cards."""
-    try:
-        # From this object
-        r = sb.table("associations").select("*").eq("from_object_type", object_type).eq("from_object_id", int(object_id)).execute()
-        rows = r.data or []
-    except Exception:
-        rows = []
+    """Show associated companies / contacts / deals as clickable cards.
 
+    Queries BOTH directions: assocations FROM this object, and assocations TO this object.
+    Dedupes by (other_type, other_id).
+    """
     by_type = {"company": [], "contact": [], "deal": []}
-    for a in rows:
-        t = a.get("to_object_type")
-        if t in by_type:
-            by_type[t].append(a)
+    seen = set()
+    try:
+        # From this object → to other
+        r = sb.table("associations").select("*").eq("from_object_type", object_type).eq("from_object_id", int(object_id)).execute()
+        for a in r.data or []:
+            t = a.get("to_object_type")
+            tid = a.get("to_object_id")
+            if t in by_type and (t, tid) not in seen:
+                seen.add((t, tid))
+                by_type[t].append({"to_object_type": t, "to_object_id": tid, "association_label": a.get("association_label")})
+        # To this object ← from other
+        r2 = sb.table("associations").select("*").eq("to_object_type", object_type).eq("to_object_id", int(object_id)).execute()
+        for a in r2.data or []:
+            t = a.get("from_object_type")
+            tid = a.get("from_object_id")
+            if t in by_type and (t, tid) not in seen:
+                seen.add((t, tid))
+                by_type[t].append({"to_object_type": t, "to_object_id": tid, "association_label": a.get("association_label")})
+    except Exception:
+        pass
 
     # Fetch the actual records in bulk
     company_ids = [a["to_object_id"] for a in by_type["company"]]
@@ -214,24 +243,40 @@ def global_search(sb, q, limit=10):
     results = []
     if not q or len(q) < 2:
         return results
-    q_like = f"%{q}%"
+    # Sanitize for PostgREST or_ syntax (commas, parens have special meaning)
+    safe = q.replace(",", " ").replace("(", "").replace(")", "")
+    q_like = f"%{safe}%"
     try:
-        cs = sb.table("companies").select("id, name, region").or_(f"name.ilike.{q_like}").limit(limit).execute()
+        cs = sb.table("companies").select("id, name, region").ilike("name", q_like).limit(limit).execute()
         for c in cs.data or []:
             results.append(("company", c["id"], f"🏢 {c['name']} · {c.get('region') or ''}"))
     except Exception:
         pass
     try:
-        ps = sb.table("contacts").select("id, first_name, last_name, email").or_(f"first_name.ilike.{q_like},last_name.ilike.{q_like},email.ilike.{q_like}").limit(limit).execute()
-        for p in ps.data or []:
+        # Try matching email first, then name halves
+        ps_email = sb.table("contacts").select("id, first_name, last_name, email").ilike("email", q_like).limit(limit).execute()
+        seen_pids = set()
+        for p in ps_email.data or []:
+            full = f"{p.get('first_name','') or ''} {p.get('last_name','') or ''}".strip() or p.get("email", "?")
+            results.append(("contact", p["id"], f"👤 {full} · {p.get('email','')}"))
+            seen_pids.add(p["id"])
+        ps_first = sb.table("contacts").select("id, first_name, last_name, email").ilike("first_name", q_like).limit(limit).execute()
+        for p in ps_first.data or []:
+            if p["id"] in seen_pids: continue
+            full = f"{p.get('first_name','') or ''} {p.get('last_name','') or ''}".strip() or p.get("email", "?")
+            results.append(("contact", p["id"], f"👤 {full} · {p.get('email','')}"))
+            seen_pids.add(p["id"])
+        ps_last = sb.table("contacts").select("id, first_name, last_name, email").ilike("last_name", q_like).limit(limit).execute()
+        for p in ps_last.data or []:
+            if p["id"] in seen_pids: continue
             full = f"{p.get('first_name','') or ''} {p.get('last_name','') or ''}".strip() or p.get("email", "?")
             results.append(("contact", p["id"], f"👤 {full} · {p.get('email','')}"))
     except Exception:
         pass
     try:
-        ds = sb.table("deals").select("id, name, stage, amount").or_(f"name.ilike.{q_like}").limit(limit).execute()
+        ds = sb.table("deals").select("id, name, stage, amount").ilike("name", q_like).limit(limit).execute()
         for d in ds.data or []:
-            results.append(("deal", d["id"], f"🤝 {d['name']} · {d.get('stage','')} · £{(d.get('amount') or 0):,.0f}"))
+            results.append(("deal", d["id"], f"🤝 {d['name']} · {d.get('stage','')} · £{float(d.get('amount') or 0):,.0f}"))
     except Exception:
         pass
     return results
@@ -279,8 +324,14 @@ def render_companies_index(sb):
                 st.rerun()
 
     # Filters
-    f1, f2, f3, f4 = st.columns([3, 2, 2, 2])
-    q = f1.text_input("Search", placeholder="🔍 Search by name, region, industry…", key="co_search", label_visibility="collapsed")
+    f1, f2, f3 = st.columns([3, 2, 2])
+    q = f1.text_input("Search", placeholder="🔍 Search by name…", key="co_search", label_visibility="collapsed")
+    # Total count
+    try:
+        total_res = sb.table("companies").select("id", count="exact").execute()
+        total = total_res.count
+    except Exception:
+        total = None
 
     # Load companies (paged)
     try:
@@ -288,14 +339,18 @@ def render_companies_index(sb):
         page = st.session_state.get("co_page", 0)
         offset = page * page_size
 
-        query = sb.table("companies").select("*")
-        if q:
-            query = query.ilike("name", f"%{q}%")
+        query = sb.table("companies").select("*").order("name")
+        if q and q.strip():
+            safe = q.strip().replace("%", "").replace("_", "")
+            query = query.ilike("name", f"%{safe}%")
         res = query.range(offset, offset + page_size - 1).execute()
         rows = res.data or []
     except Exception as e:
         st.error(f"Failed to load companies: {e}")
         return
+
+    if total is not None:
+        f2.caption(f"Showing {offset+1}–{offset+len(rows)} of {total:,} companies")
 
     if not rows:
         st.info("No companies yet. Run the migration script to import from existing leads.")
@@ -468,7 +523,7 @@ def render_deals_kanban(sb, pipelines):
                         f'</div>', unsafe_allow_html=True)
             for d in stage_deals[:15]:
                 co_name = deal_company_map.get(d["id"], "")
-                if st.button(f"{co_name or d['name']}\n£{(d.get('amount') or 0):,.0f}", key=f"dk_{d['id']}", use_container_width=True):
+                if st.button(f"{co_name or d['name']}\n£{float(d.get('amount') or 0):,.0f}", key=f"dk_{d['id']}", use_container_width=True):
                     navigate_to("deal", d["id"])
 
 
@@ -544,7 +599,7 @@ def render_deals_index(sb, pipelines=None):
             if dc1.button(f"🤝 {d['name']}", key=f"deal_open_{d['id']}", use_container_width=True):
                 navigate_to("deal", d["id"])
             dc2.markdown(f'<div style="padding-top:8px;font-size:13px;color:#64748b;">{_esc(d.get("stage") or "")}</div>', unsafe_allow_html=True)
-            dc3.markdown(f'<div style="padding-top:8px;font-size:13px;color:#1a1a2e;font-weight:600;">£{(d.get("amount") or 0):,.0f}</div>', unsafe_allow_html=True)
+            dc3.markdown(f'<div style="padding-top:8px;font-size:13px;color:#1a1a2e;font-weight:600;">£{float(d.get("amount") or 0):,.0f}</div>', unsafe_allow_html=True)
             dc4.markdown(f'<div style="padding-top:8px;font-size:12px;color:#94a3b8;">{_esc(str(d.get("close_date") or "—"))}</div>', unsafe_allow_html=True)
             st.markdown('<hr style="margin:4px 0;border:none;border-top:1px solid #f1f5f9;">', unsafe_allow_html=True)
 
@@ -565,7 +620,7 @@ def render_deal_profile(sb, deal_id):
     h1.markdown(f'''<div style="border-bottom:1px solid #e2e4e9;padding-bottom:12px;margin-bottom:20px;">
         <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;">🤝 Deal</div>
         <div style="font-size:28px;font-weight:700;color:#1a1a2e;">{_esc(deal["name"])}</div>
-        <div style="font-size:13px;color:#64748b;">{_esc(deal.get("stage") or "")} · £{(deal.get("amount") or 0):,.0f} · {_esc(deal.get("pipeline") or "")}</div>
+        <div style="font-size:13px;color:#64748b;">{_esc(deal.get("stage") or "")} · £{float(deal.get("amount") or 0):,.0f} · {_esc(deal.get("pipeline") or "")}</div>
     </div>''', unsafe_allow_html=True)
     if h2.button("← Back to Deals", key="deal_back"):
         st.session_state["view_object_type"] = None
