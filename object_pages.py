@@ -125,6 +125,32 @@ def render_tags(sb, object_type, object_id, key_prefix=""):
                 st.error(f"Tag add failed: {e}")
 
 
+def render_quick_log(sb, object_type, object_id, key_prefix=""):
+    """Quick-log a note / call / meeting / task on any object."""
+    with st.expander("✍️ Quick log", expanded=False):
+        a_type = st.selectbox("Type", ["note", "call", "meeting", "task"], key=f"{key_prefix}_qlog_type")
+        a_subj = st.text_input("Subject", key=f"{key_prefix}_qlog_subj", placeholder="e.g. Demo booked / Left voicemail")
+        a_body = st.text_area("Details", key=f"{key_prefix}_qlog_body", height=100)
+        if st.button(f"Log {a_type}", key=f"{key_prefix}_qlog_btn", type="primary"):
+            if not a_subj.strip() and not a_body.strip():
+                st.error("Add subject or details")
+            else:
+                try:
+                    from datetime import datetime as _dt
+                    sb.table("activity").insert({
+                        "object_type": object_type,
+                        "object_id": int(object_id),
+                        "type": a_type,
+                        "subject": a_subj.strip() or a_type.title(),
+                        "content": a_body.strip(),
+                        "timestamp": _dt.now().isoformat(),
+                    }).execute()
+                    st.success(f"{a_type.title()} logged")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Log failed: {e}")
+
+
 def render_associations(sb, object_type, object_id, on_click_navigate):
     """Show associated companies / contacts / deals as clickable cards."""
     try:
@@ -325,6 +351,7 @@ def render_company_profile(sb, company_id):
     main_col, side_col = st.columns([2, 1])
 
     with main_col:
+        render_quick_log(sb, "company", company_id, key_prefix="co")
         # Tabs: activity / notes / emails / tasks
         tab = st.radio("View", ["📜 Activity", "📝 Notes", "🤝 Deals", "👥 Contacts"], horizontal=True, key="co_tab", label_visibility="collapsed")
 
@@ -494,6 +521,7 @@ def render_deal_profile(sb, deal_id):
 
     main_col, side_col = st.columns([2, 1])
     with main_col:
+        render_quick_log(sb, "deal", deal_id, key_prefix="deal")
         st.markdown("### Activity")
         try:
             acts = sb.table("activity").select("*").eq("object_type", "deal").eq("object_id", int(deal_id)).order("timestamp", desc=True).limit(50).execute()
@@ -558,6 +586,7 @@ def render_contact_profile_v2(sb, contact_id):
 
     main_col, side_col = st.columns([2, 1])
     with main_col:
+        render_quick_log(sb, "contact", contact_id, key_prefix="ct")
         # Engagement summary at top
         try:
             ev = sb.table("email_events").select("event_type, occurred_at").eq("recipient_email", (contact.get("email") or "").lower()).execute()
