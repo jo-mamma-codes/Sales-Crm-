@@ -2387,7 +2387,7 @@ if _active_page == "companies":
     object_pages.render_companies_index(sb)
     st.stop()
 if _active_page == "deals":
-    object_pages.render_deals_index(sb)
+    object_pages.render_deals_index(sb, pipelines=PIPELINES)
     st.stop()
 
 # ─── Pipeline (Kanban) ──────────────────────────────────────────────────────

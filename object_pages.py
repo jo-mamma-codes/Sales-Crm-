@@ -425,8 +425,61 @@ def render_company_profile(sb, company_id):
         render_associations(sb, "company", company_id, navigate_to)
 
 
-def render_deals_index(sb):
-    """Deals list view."""
+def render_deals_kanban(sb, pipelines):
+    """Kanban-style deal board reading from deals + associations."""
+    st.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Deals Pipeline</div>'
+                '<div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Drag-style kanban — deals grouped by stage.</div>',
+                unsafe_allow_html=True)
+
+    pipe_names = list(pipelines.keys()) if pipelines else ["Sales"]
+    active_pipe = st.selectbox("Pipeline", pipe_names, key="dk_pipe")
+    stages = pipelines.get(active_pipe, ["New", "Contacted", "Demo Booked", "Proposal", "Won", "Lost"])
+
+    try:
+        all_deals = sb.table("deals").select("*").eq("pipeline", active_pipe).limit(2000).execute()
+        deals = all_deals.data or []
+    except Exception as e:
+        st.error(f"Load failed: {e}")
+        return
+
+    # Fetch company names per deal via associations
+    deal_ids = [d["id"] for d in deals]
+    deal_company_map = {}
+    if deal_ids:
+        try:
+            assoc = sb.table("associations").select("*").in_("from_object_id", deal_ids).eq("from_object_type", "deal").eq("to_object_type", "company").execute()
+            company_ids = [a["to_object_id"] for a in assoc.data or []]
+            if company_ids:
+                cos = sb.table("companies").select("id, name").in_("id", company_ids).execute()
+                co_map = {c["id"]: c["name"] for c in cos.data or []}
+                for a in assoc.data or []:
+                    deal_company_map[a["from_object_id"]] = co_map.get(a["to_object_id"], "")
+        except Exception:
+            pass
+
+    cols = st.columns(len(stages))
+    for i, stage in enumerate(stages):
+        stage_deals = [d for d in deals if d.get("stage") == stage]
+        stage_total = sum(float(d.get("amount") or 0) for d in stage_deals)
+        with cols[i]:
+            st.markdown(f'<div style="background:#f8f9fb;border:1px solid #e2e4e9;border-radius:8px;padding:10px;margin-bottom:8px;">'
+                        f'<div style="font-size:13px;font-weight:600;color:#1a1a2e;">{stage}</div>'
+                        f'<div style="font-size:11px;color:#94a3b8;">{len(stage_deals)} deals · £{stage_total:,.0f}</div>'
+                        f'</div>', unsafe_allow_html=True)
+            for d in stage_deals[:15]:
+                co_name = deal_company_map.get(d["id"], "")
+                if st.button(f"{co_name or d['name']}\n£{(d.get('amount') or 0):,.0f}", key=f"dk_{d['id']}", use_container_width=True):
+                    navigate_to("deal", d["id"])
+
+
+def render_deals_index(sb, pipelines=None):
+    """Deals list / kanban view."""
+    # View toggle
+    view_mode = st.radio("View", ["📊 Kanban", "📋 List"], horizontal=True, key="deals_view", label_visibility="collapsed")
+    if view_mode == "📊 Kanban":
+        render_deals_kanban(sb, pipelines or {})
+        return
+
     h1, h2 = st.columns([4, 1])
     h1.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Deals</div>'
                 '<div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">All opportunities in flight.</div>',
