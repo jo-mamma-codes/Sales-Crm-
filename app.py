@@ -1958,6 +1958,44 @@ if view_lead_id and not df.empty and (df["id"] == str(view_lead_id)).any():
             <div style="font-size:12px;color:#64748b;white-space:pre-wrap;line-height:1.5;">{esc(_notes_preview)}</div>
         </div>""", unsafe_allow_html=True)
 
+        # Engagement summary (from email_events)
+        try:
+            _ev_lead = sb.table("email_events").select("event_type, occurred_at").eq("lead_id", int(lead_id)).execute()
+            if _ev_lead.data:
+                _ev_counts = {}
+                _last_open = None
+                for e in _ev_lead.data:
+                    et = e.get("event_type")
+                    _ev_counts[et] = _ev_counts.get(et, 0) + 1
+                    if et == "opened" and e.get("occurred_at"):
+                        _occ = e["occurred_at"]
+                        if _last_open is None or _occ > _last_open:
+                            _last_open = _occ
+                _opens_n = _ev_counts.get("opened", 0)
+                _clicks_n = _ev_counts.get("clicked", 0)
+                _replies_n = _ev_counts.get("replied", 0)
+                _bounced_n = _ev_counts.get("bounced", 0)
+                _delivered_n = _ev_counts.get("delivered", 0)
+                _lo_str = ""
+                if _last_open:
+                    try:
+                        _lo_dt = datetime.fromisoformat(_last_open.replace("Z", "+00:00"))
+                        _lo_str = _lo_dt.strftime("%d %b %Y %H:%M")
+                    except Exception:
+                        _lo_str = str(_last_open)[:16]
+                st.markdown(f'''<div class="profile-sidebar-card">
+                    <h4>Engagement</h4>
+                    <div style="font-size:13px;line-height:1.7;">
+                    ✅ Delivered: <strong>{_delivered_n}</strong><br>
+                    👁 Opens: <strong>{_opens_n}</strong> {f"<span style='color:#94a3b8;font-size:11px;'>(last: {_lo_str})</span>" if _lo_str else ""}<br>
+                    🔗 Clicks: <strong>{_clicks_n}</strong><br>
+                    💬 Replies: <strong>{_replies_n}</strong><br>
+                    ⚠️ Bounces: <strong>{_bounced_n}</strong>
+                    </div>
+                </div>''', unsafe_allow_html=True)
+        except Exception:
+            pass
+
         # Active / past sequences for this lead
         try:
             _lead_seq = sb.table("sequence_queue").select("*").eq("lead_id", int(lead_id)).execute()
@@ -2608,7 +2646,7 @@ if _active_page == "contacts":
     _seq_q_for_filter = load_seq_queue()
     _seq_names = ["Any"] + ["Not enrolled"] + (sorted(_seq_q_for_filter["sequence_name"].unique().tolist()) if not _seq_q_for_filter.empty else [])
     c_seq = cg1.selectbox("Enrolled in sequence", _seq_names, key="c_seq")
-    c_email_status = cg2.selectbox("Email status", ["Any", "Never emailed", "Emailed (any time)", "Emailed in last 7 days", "Has reply", "Bounced"], key="c_email_status")
+    c_email_status = cg2.selectbox("Email status", ["Any", "Never emailed", "Emailed (any time)", "Emailed in last 7 days", "Has reply", "Bounced", "🔥 Opened (any)", "🔥🔥 Opened 3+ times", "🔗 Clicked link"], key="c_email_status")
     c_uploaded = cg3.selectbox("Upload date", ["Any", "Today", "Last 7 days", "Last 30 days"], key="c_uploaded")
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2662,6 +2700,28 @@ if _active_page == "contacts":
             _bounce_acts = _act_c[_act_c["type"] == "bounce"] if "type" in _act_c.columns else pd.DataFrame()
             _bounce_ids = set(str(x) for x in _bounce_acts["lead_id"].unique()) if not _bounce_acts.empty else set()
             cview = cview[cview["id"].astype(str).isin(_bounce_ids)]
+        elif c_email_status in ("🔥 Opened (any)", "🔥🔥 Opened 3+ times", "🔗 Clicked link"):
+            try:
+                _ev_c = sb.table("email_events").select("lead_id, event_type").execute()
+                _open_count_map = {}
+                _clicked_set = set()
+                for e in _ev_c.data or []:
+                    lid = str(e.get("lead_id")) if e.get("lead_id") is not None else None
+                    if not lid:
+                        continue
+                    if e.get("event_type") == "opened":
+                        _open_count_map[lid] = _open_count_map.get(lid, 0) + 1
+                    elif e.get("event_type") == "clicked":
+                        _clicked_set.add(lid)
+                if c_email_status == "🔥 Opened (any)":
+                    _ids = set(_open_count_map.keys())
+                elif c_email_status == "🔥🔥 Opened 3+ times":
+                    _ids = set(k for k, v in _open_count_map.items() if v >= 3)
+                else:
+                    _ids = _clicked_set
+                cview = cview[cview["id"].astype(str).isin(_ids)]
+            except Exception:
+                pass
 
     # Upload date filter (uses 'created' column)
     if c_uploaded != "Any" and "created" in cview.columns:
