@@ -4704,6 +4704,82 @@ if _active_page == "reports":
         <div style="font-size:13px;color:#94a3b8;margin-bottom:20px;">Pipeline health, conversion rates, and activity trends</div>""", unsafe_allow_html=True)
 
         # ── Today's digest ──
+        # ── Hot leads / engagement (top of Reports) ──
+        st.markdown("### 🔥 Hot Leads — Prioritise these")
+        try:
+            _all_events = sb.table("email_events").select("*").order("occurred_at", desc=True).limit(2000).execute()
+            _ev_df = pd.DataFrame(_all_events.data) if _all_events.data else pd.DataFrame()
+        except Exception:
+            _ev_df = pd.DataFrame()
+
+        if _ev_df.empty:
+            st.info("No email events yet. Send an email via Resend and Resend will start logging delivered/opened/clicked/bounced/replied events here.")
+        else:
+            # Headline metrics
+            _opened_unique = _ev_df[_ev_df["event_type"] == "opened"]["lead_id"].nunique()
+            _clicked_unique = _ev_df[_ev_df["event_type"] == "clicked"]["lead_id"].nunique()
+            _replied_unique = _ev_df[_ev_df["event_type"] == "replied"]["lead_id"].nunique()
+            _bounced_unique = _ev_df[_ev_df["event_type"] == "bounced"]["lead_id"].nunique()
+            _opens_total = len(_ev_df[_ev_df["event_type"] == "opened"])
+            _delivered_total = len(_ev_df[_ev_df["event_type"] == "delivered"])
+
+            hl1, hl2, hl3, hl4, hl5, hl6 = st.columns(6)
+            hl1.metric("Delivered", _delivered_total)
+            hl2.metric("Unique opens", _opened_unique, help=f"{_opens_total} total opens across all leads")
+            hl3.metric("Clicked link", _clicked_unique)
+            hl4.metric("Replied", _replied_unique)
+            hl5.metric("Bounced", _bounced_unique)
+            hl6.metric("Open rate", f"{(_opened_unique/_delivered_total*100):.0f}%" if _delivered_total else "—")
+
+            # Aggregate per lead — opens count + last open
+            _opens = _ev_df[_ev_df["event_type"] == "opened"].copy()
+            _clicks = _ev_df[_ev_df["event_type"] == "clicked"].copy()
+            _replies = _ev_df[_ev_df["event_type"] == "replied"].copy()
+
+            if not _opens.empty:
+                _opens["occurred_at"] = pd.to_datetime(_opens["occurred_at"], errors="coerce")
+                _per_lead = _opens.groupby("lead_id").agg(
+                    opens=("event_type", "count"),
+                    last_open=("occurred_at", "max"),
+                ).reset_index()
+                _per_lead["clicked"] = _per_lead["lead_id"].isin(_clicks["lead_id"].unique()) if not _clicks.empty else False
+                _per_lead["replied"] = _per_lead["lead_id"].isin(_replies["lead_id"].unique()) if not _replies.empty else False
+
+                # Join with df for business name / contact / email
+                _df_lookup = df.set_index(df["id"].astype(str)) if not df.empty else pd.DataFrame()
+                rows = []
+                for _, r in _per_lead.iterrows():
+                    lid = str(int(r["lead_id"])) if pd.notna(r["lead_id"]) else None
+                    if not lid or lid not in _df_lookup.index:
+                        continue
+                    led = _df_lookup.loc[lid] if not _df_lookup.empty else {}
+                    rows.append({
+                        "🔥 Score": ("🔥" * min(int(r["opens"]), 5)) + (" 💬" if r["replied"] else "") + (" 🔗" if r["clicked"] else ""),
+                        "Business": led.get("business_name", ""),
+                        "Contact": led.get("contact_name", ""),
+                        "Email": led.get("email", ""),
+                        "Stage": led.get("stage", ""),
+                        "Opens": int(r["opens"]),
+                        "Clicked": "✓" if r["clicked"] else "",
+                        "Replied": "✓" if r["replied"] else "",
+                        "Last open": r["last_open"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["last_open"]) else "",
+                        "Lead ID": lid,
+                    })
+
+                if rows:
+                    _hot_df = pd.DataFrame(rows).sort_values(["Replied", "Clicked", "Opens", "Last open"], ascending=[False, False, False, False])
+                    st.dataframe(_hot_df, use_container_width=True, hide_index=True, height=400)
+                    st.caption("Sorted by replied > clicked > opens > recency. Click column headers to re-sort.")
+
+                    # Export
+                    if st.button("📥 Download CSV", key="hot_leads_export"):
+                        csv = _hot_df.to_csv(index=False).encode("utf-8")
+                        st.download_button("⬇️ Download", csv, "hot_leads.csv", "text/csv", key="dl_hot")
+                else:
+                    st.info("No opens yet — once recipients open emails sent via Resend they'll appear here.")
+
+        st.divider()
+
         st.markdown("### 📅 Today's Activity")
         _act_rep = load_activity()
         _td_start = pd.Timestamp.now().normalize()
