@@ -183,6 +183,34 @@ def navigate_to(obj_type, obj_id):
     st.rerun()
 
 
+def global_search(sb, q, limit=10):
+    """Search across companies, contacts, deals. Returns list of (type, id, display)."""
+    results = []
+    if not q or len(q) < 2:
+        return results
+    q_like = f"%{q}%"
+    try:
+        cs = sb.table("companies").select("id, name, region").or_(f"name.ilike.{q_like}").limit(limit).execute()
+        for c in cs.data or []:
+            results.append(("company", c["id"], f"🏢 {c['name']} · {c.get('region') or ''}"))
+    except Exception:
+        pass
+    try:
+        ps = sb.table("contacts").select("id, first_name, last_name, email").or_(f"first_name.ilike.{q_like},last_name.ilike.{q_like},email.ilike.{q_like}").limit(limit).execute()
+        for p in ps.data or []:
+            full = f"{p.get('first_name','') or ''} {p.get('last_name','') or ''}".strip() or p.get("email", "?")
+            results.append(("contact", p["id"], f"👤 {full} · {p.get('email','')}"))
+    except Exception:
+        pass
+    try:
+        ds = sb.table("deals").select("id, name, stage, amount").or_(f"name.ilike.{q_like}").limit(limit).execute()
+        for d in ds.data or []:
+            results.append(("deal", d["id"], f"🤝 {d['name']} · {d.get('stage','')} · £{(d.get('amount') or 0):,.0f}"))
+    except Exception:
+        pass
+    return results
+
+
 def render_companies_index(sb):
     """Companies list view — sortable table with quick stats."""
     st.markdown('<div style="font-size:22px;font-weight:700;color:#1a1a2e;margin-bottom:4px;">Companies</div>'
@@ -451,13 +479,64 @@ def render_contact_profile_v2(sb, contact_id):
 
     main_col, side_col = st.columns([2, 1])
     with main_col:
-        st.markdown("### Timeline")
+        # Engagement summary at top
         try:
-            acts = sb.table("activity").select("*").eq("object_type", "contact").eq("object_id", int(contact_id)).order("timestamp", desc=True).limit(50).execute()
-            for a in acts.data or []:
-                st.markdown(f"- **{a.get('type','?').upper()}** · {a.get('timestamp', '')[:16]} — {a.get('subject', '')}")
+            ev = sb.table("email_events").select("event_type, occurred_at").eq("recipient_email", (contact.get("email") or "").lower()).execute()
+            ev_counts = {}
+            last_open = None
+            for e in ev.data or []:
+                et = e.get("event_type")
+                ev_counts[et] = ev_counts.get(et, 0) + 1
+                if et == "opened" and (last_open is None or e["occurred_at"] > last_open):
+                    last_open = e["occurred_at"]
+            if ev_counts:
+                ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                ec1.metric("📨 Delivered", ev_counts.get("delivered", 0))
+                ec2.metric("👁 Opens", ev_counts.get("opened", 0))
+                ec3.metric("🔗 Clicks", ev_counts.get("clicked", 0))
+                ec4.metric("💬 Replies", ev_counts.get("replied", 0))
+                ec5.metric("⚠️ Bounces", ev_counts.get("bounced", 0))
+                if last_open:
+                    st.caption(f"Last opened: {last_open[:16]}")
         except Exception:
+            pass
+
+        st.markdown("### Timeline")
+        # Activity log entries
+        timeline = []
+        try:
+            acts = sb.table("activity").select("*").or_(f"object_type.eq.contact,lead_id.eq.{contact.get('legacy_lead_id') or 0}").eq("object_id" if False else "object_type", "contact").execute()
+            for a in acts.data or []:
+                timeline.append({
+                    "ts": a.get("timestamp", ""),
+                    "icon": {"email": "✉️", "call": "📞", "note": "📝", "task": "✅", "meeting": "📅"}.get(a.get("type",""), "•"),
+                    "label": f"{a.get('subject') or a.get('type','')} — {(a.get('content') or '')[:120]}",
+                })
+        except Exception:
+            pass
+        # Email events
+        try:
+            ev_t = sb.table("email_events").select("*").eq("recipient_email", (contact.get("email") or "").lower()).order("occurred_at", desc=True).limit(50).execute()
+            for e in ev_t.data or []:
+                icon = {"sent": "✉️", "delivered": "✅", "opened": "👁", "clicked": "🔗", "bounced": "⚠️", "replied": "💬"}.get(e.get("event_type",""), "•")
+                timeline.append({
+                    "ts": e.get("occurred_at", ""),
+                    "icon": icon,
+                    "label": f"Email {e.get('event_type','')} (via {e.get('source','')})",
+                })
+        except Exception:
+            pass
+        # Sort by timestamp desc
+        timeline.sort(key=lambda x: x["ts"] or "", reverse=True)
+        if not timeline:
             st.info("No activity yet.")
+        else:
+            for item in timeline[:50]:
+                ts_short = str(item["ts"])[:16]
+                st.markdown(f'<div style="font-size:13px;padding:6px 0;border-bottom:1px solid #f1f5f9;">'
+                            f'<span style="color:#94a3b8;font-size:11px;">{ts_short}</span> &nbsp; '
+                            f'<strong>{item["icon"]}</strong> {_esc(item["label"])}</div>',
+                            unsafe_allow_html=True)
 
     with side_col:
         st.markdown("### Properties")
@@ -476,6 +555,26 @@ def render_contact_profile_v2(sb, contact_id):
 
         st.markdown("### Associations")
         render_associations(sb, "contact", contact_id, navigate_to)
+
+        # Sequence enrollments (via legacy lead_id matched to contact.email if migrated)
+        try:
+            # Lookup matching leads by email
+            if contact.get("email"):
+                legacy = sb.table("leads").select("id").ilike("email", contact["email"]).execute()
+                legacy_ids = [r["id"] for r in legacy.data or []]
+                if legacy_ids:
+                    seq = sb.table("sequence_queue").select("*").in_("lead_id", [int(x) for x in legacy_ids]).execute()
+                    if seq.data:
+                        by_seq = {}
+                        for r in seq.data:
+                            by_seq.setdefault(r["sequence_name"], []).append(r)
+                        st.markdown("### Sequences")
+                        for sn, rows in by_seq.items():
+                            done = sum(1 for r in rows if r["status"] == "done")
+                            pending = sum(1 for r in rows if r["status"] == "pending")
+                            st.markdown(f"**{sn}** — ✅ {done} sent · ⏳ {pending} pending")
+        except Exception:
+            pass
 
         st.markdown("### Tags")
         render_tags(sb, "contact", contact_id, key_prefix="ct")

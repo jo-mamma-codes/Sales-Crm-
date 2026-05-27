@@ -1776,23 +1776,34 @@ def close_profile():
 # ─── Global search bar (shown on pipeline + contacts) ──────────────────────
 gs1, gs2 = st.columns([3, 1])
 global_search = gs1.text_input("🔍 Search leads by name, email, phone, or business", key="global_search", label_visibility="collapsed", placeholder="Search leads by name, email, phone, or business...")
-if global_search and not df.empty:
-    m = (df["business_name"].str.contains(global_search, case=False, na=False)
-         | df["email"].str.contains(global_search, case=False, na=False)
-         | df["contact_name"].str.contains(global_search, case=False, na=False)
-         | df["phone"].str.contains(global_search, case=False, na=False)
-         | df["notes"].str.contains(global_search, case=False, na=False))
-    results = df[m].head(10)
-    if results.empty:
-        st.caption("No lead results")
-    else:
-        st.markdown("**Leads**")
-        for _, r in results.iterrows():
-            rc1, rc2, rc3, rc4 = st.columns([2, 2, 1, 1])
-            rc1.write(f"**{r['business_name']}** — {r['contact_name']}")
-            rc2.write(r["email"])
-            rc3.write(r["stage"])
-            rc4.button("View", key=f"gs_{r['id']}", on_click=open_profile, args=(r["id"],))
+if global_search:
+    # Search across new object model (companies, contacts, deals)
+    try:
+        obj_results = object_pages.global_search(sb, global_search, limit=8)
+        if obj_results:
+            st.markdown("**Quick results**")
+            for otype, oid, display in obj_results:
+                if st.button(display, key=f"gs_obj_{otype}_{oid}", use_container_width=True):
+                    object_pages.navigate_to(otype, oid)
+    except Exception:
+        pass
+
+    # Legacy lead search (during migration period)
+    if not df.empty:
+        m = (df["business_name"].str.contains(global_search, case=False, na=False)
+             | df["email"].str.contains(global_search, case=False, na=False)
+             | df["contact_name"].str.contains(global_search, case=False, na=False)
+             | df["phone"].str.contains(global_search, case=False, na=False)
+             | df["notes"].str.contains(global_search, case=False, na=False))
+        results = df[m].head(5)
+        if not results.empty:
+            st.markdown("**Legacy leads** (pre-migration)")
+            for _, r in results.iterrows():
+                rc1, rc2, rc3, rc4 = st.columns([2, 2, 1, 1])
+                rc1.write(f"**{r['business_name']}** — {r['contact_name']}")
+                rc2.write(r["email"])
+                rc3.write(r["stage"])
+                rc4.button("View", key=f"gs_{r['id']}", on_click=open_profile, args=(r["id"],))
 
     # Search activities too
     act_df = load_activity()
