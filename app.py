@@ -869,12 +869,27 @@ DEFAULT_PIPELINES = {
 PIPELINES_FILE = ROOT / "pipelines.json"
 
 def load_pipelines():
+    """Supabase app_config first, fall back to local file, then defaults."""
+    try:
+        r = sb.table("app_config").select("value").eq("key", "pipelines").execute()
+        if r.data and r.data[0].get("value"):
+            v = r.data[0]["value"]
+            return json.loads(v) if isinstance(v, str) else dict(v)
+    except Exception:
+        pass
     if PIPELINES_FILE.exists():
         return json.loads(PIPELINES_FILE.read_text())
     return DEFAULT_PIPELINES
 
 def save_pipelines(p):
-    PIPELINES_FILE.write_text(json.dumps(p, indent=2))
+    try:
+        sb.table("app_config").upsert({"key": "pipelines", "value": json.dumps(p)}).execute()
+    except Exception as e:
+        print(f"Could not persist pipelines to Supabase: {e}")
+    try:
+        PIPELINES_FILE.write_text(json.dumps(p, indent=2))
+    except Exception:
+        pass
 
 PIPELINES = load_pipelines()  # initial load; also reloaded on rerun since module re-executes
 DEFAULT_TARGET = 20
@@ -1065,6 +1080,54 @@ input:focus, textarea:focus { border-color: #7c3aed !important; box-shadow: 0 0 
 
 /* ── Tabs (hidden — using sidebar nav) ── */
 .stTabs { display: none !important; }
+
+/* ── Polish: cards, hover, shadows ── */
+[data-testid="stContainer"] { transition: box-shadow .15s ease; }
+[data-testid="stContainer"]:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+[data-testid="stExpander"] {
+    background: #fff !important;
+    border: 1px solid #e2e4e9 !important;
+    border-radius: 10px !important;
+    margin-bottom: 8px !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+}
+[data-testid="stExpander"] summary {
+    font-weight: 600 !important; font-size: 13px !important;
+    padding: 10px 14px !important;
+}
+[data-testid="stExpander"]:hover summary {
+    background: #fafbfc !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    background: #232342 !important; border-color: #2d2d4a !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+    color: #ef4444 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stButton"] button {
+    font-size: 11px !important; padding: 4px 8px !important;
+    height: auto !important; min-height: 0 !important;
+    background: #2d2d4a !important; color: #c4c4d4 !important;
+    border: none !important; text-align: left !important;
+}
+section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stButton"] button:hover {
+    background: #3d3d5a !important; color: #fff !important;
+}
+
+/* Profile headers */
+.profile-header {
+    background: linear-gradient(135deg, #fff 0%, #f8f9fb 100%);
+    border: 1px solid #e2e4e9;
+    border-radius: 14px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.03);
+}
+
+/* Property group expander style on profile pages */
+[data-testid="stContainer"] > div > [data-testid="stExpander"] {
+    border-radius: 8px !important;
+}
 
 /* ── Buttons (base — overridden by compact section below) ── */
 .stSelectbox > div > div { background: #fff !important; color: #1a1a2e !important; border-radius: 8px !important; }
@@ -1747,11 +1810,14 @@ _stale_leads.sort(key=lambda x: -x[2])
 
 if _stale_leads:
     with st.sidebar:
-        st.markdown(f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:12px;">'
-                    f'<div style="font-weight:700;color:#ef4444;font-size:14px;">⚠️ {len(_stale_leads)} Stale Leads</div>'
-                    f'<div style="font-size:12px;color:#94a3b8;">No activity 7+ days</div></div>', unsafe_allow_html=True)
-        for _biz, _stg, _days, _lid in _stale_leads[:10]:
-            st.sidebar.button(f"🔴 {_biz} ({_days}d)", key=f"stale_{_lid}", on_click=lambda lid=_lid: st.session_state.update({"view_lead_id": str(lid)}))
+        with st.expander(f"⚠️ {len(_stale_leads)} stale leads (7+ days)", expanded=False):
+            st.caption("Click to open the lead")
+            for _biz, _stg, _days, _lid in _stale_leads[:15]:
+                if st.button(f"🔴 {_biz[:24]} · {_days}d", key=f"stale_{_lid}", use_container_width=True):
+                    st.session_state["view_lead_id"] = str(_lid)
+                    st.rerun()
+            if len(_stale_leads) > 15:
+                st.caption(f"+{len(_stale_leads)-15} more — go to Follow Up page")
 
 if DUPLICATES:
     with st.sidebar:
